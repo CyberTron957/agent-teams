@@ -22,6 +22,8 @@ _pending_lock = threading.Lock()
 
 def add_pending_question(agent_name: str, question: str) -> str:
     """Register a new human question and return its ID."""
+    from swarm_server.config import MAX_PENDING_QUESTIONS
+
     qid = str(uuid.uuid4())
     with _pending_lock:
         _pending_human_questions[qid] = {
@@ -32,6 +34,15 @@ def add_pending_question(agent_name: str, question: str) -> str:
             "status": "pending",
             "response": None,
         }
+        # Bound the in-memory registry: drop oldest RESOLVED questions past the
+        # cap (never drop pending ones — an agent may still be waiting on them).
+        if len(_pending_human_questions) > MAX_PENDING_QUESTIONS:
+            resolved = sorted(
+                (q for q in _pending_human_questions.values() if q["status"] != "pending"),
+                key=lambda q: q["timestamp"],
+            )
+            for q in resolved[: len(_pending_human_questions) - MAX_PENDING_QUESTIONS]:
+                _pending_human_questions.pop(q["id"], None)
     return qid
 
 
@@ -173,6 +184,14 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
     task_id = target.ingest_task(from_agent=caller, payload=message)
     log.info("[send_peer_message] %s -> %s | task_id=%s", caller, to_agent, task_id[:8])
 
+    # Persist the peer message (not just broadcast it) so historical/REST queries
+    # can reconstruct the conversation graph, not only the live dashboard.
+    monitor_db.log_event(
+        caller, "message_sent",
+        from_agent=caller, to_agent=to_agent, task_id=task_id,
+        data={"message_preview": message[:120]},
+    )
+
     _broadcast("message_sent", {
         "from_agent": caller,
         "to_agent": to_agent,
@@ -205,6 +224,8 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
     qid = add_pending_question(caller, question)
     daemon.human_question_id = qid
 
+    from swarm_server.agent import AGENT_STATE_ASKING_HUMAN, AGENT_STATE_BUSY
+
     monitor_db.log_event(caller, "human_waiting", data={"question": question, "question_id": qid})
     _broadcast("human_waiting", {
         "agent_name": caller,
@@ -214,14 +235,14 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
     })
 
     with daemon._lock:
-        daemon.state = "asking_human"
+        daemon.state = AGENT_STATE_ASKING_HUMAN
 
     daemon.human_event.clear()
     daemon.human_response = None
     daemon.human_event.wait(timeout=300)  # 5 min timeout
 
     with daemon._lock:
-        daemon.state = "busy"
+        daemon.state = AGENT_STATE_BUSY
 
     # Check if a response was provided via the API
     with _pending_lock:
@@ -233,7 +254,14 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
 
     if not daemon.human_event.is_set():
         log.warning("[%s] [ask_human] Timeout — no human response in 300s", daemon.name)
-        daemon.state = "idle"
+        # NOTE: deliberately do NOT set state to "idle" here. This handler runs
+        # *inside* run_conversation on the agent's worker thread, and that
+        # conversation is still in flight (the LLM receives this error and keeps
+        # going). State was restored to "busy" just above; leaving it that way
+        # prevents the sweep loop from launching a SECOND concurrent
+        # run_conversation on the same agent. The sweep loop's finally-block is
+        # the single owner of the busy→idle transition and resets it once the
+        # run actually returns.
         return json.dumps({
             "success": False,
             "error": "No human responded within 5 minutes. Proceed with your best judgment or retry later.",

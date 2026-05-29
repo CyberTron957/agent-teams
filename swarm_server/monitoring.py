@@ -49,7 +49,13 @@ class MonitoringDB:
         self._migrate_add_team_id()
 
     def _conn(self):
-        return sqlite3.connect(str(self.db_path), timeout=10, check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), timeout=10, check_same_thread=False)
+        # All agent threads write this one DB concurrently; WAL + busy_timeout
+        # prevent "database is locked" under load.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def _init_db(self):
         with self._conn() as conn:
@@ -179,6 +185,37 @@ class MonitoringDB:
         except Exception as e:
             log.warning("[MonitorDB] Failed to get messages: %s", e)
             return []
+
+    def prune(self, max_events: int, max_messages: int) -> Dict[str, int]:
+        """Trim events/messages to the most recent N rows each (rolling retention).
+
+        Without this the DB grows unbounded on a 24/7 run (state-change and
+        message volume dominate). Returns rows deleted per table.
+        """
+        deleted = {"events": 0, "messages": 0}
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    "DELETE FROM events WHERE id NOT IN "
+                    "(SELECT id FROM events ORDER BY id DESC LIMIT ?)",
+                    (max_events,),
+                )
+                deleted["events"] = cur.rowcount or 0
+                cur = conn.execute(
+                    "DELETE FROM messages WHERE id NOT IN "
+                    "(SELECT id FROM messages ORDER BY id DESC LIMIT ?)",
+                    (max_messages,),
+                )
+                deleted["messages"] = cur.rowcount or 0
+                conn.commit()
+            if deleted["events"] or deleted["messages"]:
+                log.info(
+                    "[MonitorDB] Pruned %d events, %d messages",
+                    deleted["events"], deleted["messages"],
+                )
+        except Exception as e:
+            log.warning("[MonitorDB] Prune failed: %s", e)
+        return deleted
 
     def get_agent_stats(self, team_id: Optional[str] = None) -> Dict[str, dict]:
         stats = {}

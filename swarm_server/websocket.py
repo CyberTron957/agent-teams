@@ -39,14 +39,20 @@ class WSBroadcaster:
         if not self.clients:
             return
         message = json.dumps({"type": event_type, "payload": payload})
-        disconnected = []
         async with self._lock:
             clients = list(self.clients)
-        for ws in clients:
+
+        async def _send(ws):
             try:
-                await ws.send_text(message)
+                # Per-client timeout: a slow/half-dead client must not stall
+                # delivery to everyone else (sends now run concurrently).
+                await asyncio.wait_for(ws.send_text(message), timeout=5.0)
+                return None
             except Exception:
-                disconnected.append(ws)
+                return ws
+
+        results = await asyncio.gather(*(_send(ws) for ws in clients))
+        disconnected = [ws for ws in results if ws is not None]
         if disconnected:
             async with self._lock:
                 for ws in disconnected:

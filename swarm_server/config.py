@@ -2,12 +2,35 @@
 
 import json
 import logging
+import os
 import shutil
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("swarm.config")
+
+# Serializes all reads/writes of agents_config.json across threads. Reentrant
+# because the read path (load_agents_config) may trigger a migration write
+# (_save_full_config) within the same call.
+_config_lock = threading.RLock()
+
+# In-process cache of the parsed config, keyed on the file's (mtime_ns, size).
+# load_agents_config() is on the hot path (every peer message); without this it
+# re-reads + re-parses + re-runs migration scans on every call. Callers mutate
+# the returned dict, so reads always hand back a deep copy.
+_config_cache: Optional[Dict[str, Any]] = None
+_config_cache_key: Optional[tuple] = None
+
+
+def _config_file_key() -> Optional[tuple]:
+    try:
+        st = AGENTS_CONFIG_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
 
 # ---------------------------------------------------------------------------
 # Paths (relative to project root)
@@ -27,6 +50,63 @@ SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8000
 LITELLM_API_BASE = f"http://{SERVER_HOST}:4000/v1"
 SWEEP_INTERVAL_SECONDS = 10
+
+# ---------------------------------------------------------------------------
+# Context / session compression (Hermes built-in ContextCompressor)
+# ---------------------------------------------------------------------------
+# Hermes auto-compacts a conversation once its token estimate crosses
+# context_window * threshold; the middle turns are summarized by the auxiliary
+# model and the session is split in SQLite (a new child session holds the
+# summary + recent tail). These settings are written into each agent's isolated
+# {HERMES_HOME}/config.yaml so compaction triggers deterministically rather than
+# relying on provider auto-detection — which cannot see the real model behind a
+# LiteLLM proxy and would otherwise fall back to a 256K guess.
+#
+# CONTEXT window is pinned conservatively: setting it BELOW the real backing
+# model only compacts sooner (cheap, safe); setting it ABOVE risks a hard
+# context-overflow error before Hermes ever compacts. Tune to match (or sit
+# just under) your LiteLLM backing model's real window. Must be >= 64000
+# (Hermes' MINIMUM_CONTEXT_LENGTH) or AIAgent init raises.
+COMPRESSION_ENABLED = True
+AGENT_CONTEXT_WINDOW = 128000
+COMPRESSION_THRESHOLD = 0.5          # compact at ~50% of the window
+COMPRESSION_TARGET_RATIO = 0.20      # summary budget as a fraction of compacted content
+COMPRESSION_PROTECT_FIRST_N = 3      # head turns kept verbatim (besides system prompt)
+COMPRESSION_PROTECT_LAST_N = 12      # recent tail turns kept verbatim
+
+# ---------------------------------------------------------------------------
+# Queue / sweep behavior
+# ---------------------------------------------------------------------------
+MAX_BATCH_SIZE = 10          # max tasks pulled into one LLM turn (backpressure)
+MAX_TASK_RETRIES = 3         # batch failures requeue up to N times, then -> 'failed' (DLQ)
+
+# ---------------------------------------------------------------------------
+# Monitoring retention — rolling cap so monitoring.db stays bounded over 24/7 runs
+# ---------------------------------------------------------------------------
+MONITORING_MAX_EVENTS = 50000
+MONITORING_MAX_MESSAGES = 20000
+MONITORING_PRUNE_INTERVAL_SECONDS = 300
+
+# Human-inbox registry cap (in-memory) — drop oldest resolved questions past this.
+MAX_PENDING_QUESTIONS = 500
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+# The dashboard is served same-origin, so it needs no CORS at all; restricting to
+# localhost drops the spec-invalid wildcard+credentials combo. Override with the
+# SWARM_CORS_ORIGINS env var (comma-separated) if hosting the UI elsewhere.
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "SWARM_CORS_ORIGINS",
+        f"http://{SERVER_HOST}:{SERVER_PORT},http://localhost:{SERVER_PORT}",
+    ).split(",")
+    if o.strip()
+]
+# Optional bearer token guarding mutating endpoints. Unset => auth disabled
+# (relies on localhost binding). Set SWARM_API_KEY to require it.
+SWARM_API_KEY = os.environ.get("SWARM_API_KEY", "").strip()
 
 # ---------------------------------------------------------------------------
 # Common SOUL — shared by all agents in the framework
@@ -105,6 +185,75 @@ def _derive_workspace_path(team_id: str, agent_name: str) -> Path:
 def _get_team_workspace_path(team_id: str) -> Path:
     """Return the shared team workspace directory."""
     return WORKSPACE_ROOT / team_id / "workspace"
+
+
+def write_agent_hermes_config(hermes_home: Path) -> None:
+    """Write/merge the Hermes config.yaml under an agent's isolated HERMES_HOME.
+
+    Enables and tunes the built-in ContextCompressor so long-running agents
+    auto-compact instead of growing their conversation unbounded. Hermes reads
+    {HERMES_HOME}/config.yaml at AIAgent init (cached on the file's mtime+size,
+    keyed per path), so this must be written BEFORE the agent is constructed.
+
+    Existing keys are preserved; only the compression-relevant sections are
+    (re)written so the values stay in sync with the swarm constants above.
+    """
+    import yaml
+
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    cfg_path = hermes_home / "config.yaml"
+
+    existing: Dict[str, Any] = {}
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception as e:
+            log.warning("Could not parse existing %s (%s) — rewriting", cfg_path, e)
+
+    model_section = existing.get("model")
+    if not isinstance(model_section, dict):
+        model_section = {}
+    model_section["context_length"] = AGENT_CONTEXT_WINDOW
+    existing["model"] = model_section
+
+    existing["compression"] = {
+        "enabled": COMPRESSION_ENABLED,
+        "threshold": COMPRESSION_THRESHOLD,
+        "target_ratio": COMPRESSION_TARGET_RATIO,
+        "protect_first_n": COMPRESSION_PROTECT_FIRST_N,
+        "protect_last_n": COMPRESSION_PROTECT_LAST_N,
+        "abort_on_summary_failure": False,
+    }
+
+    aux_section = existing.get("auxiliary")
+    if not isinstance(aux_section, dict):
+        aux_section = {}
+    aux_comp = aux_section.get("compression")
+    if not isinstance(aux_comp, dict):
+        aux_comp = {}
+    # The summarizer reuses the main model via the LiteLLM proxy (no override),
+    # so it shares the same window; tell the feasibility check about it.
+    aux_comp["context_length"] = AGENT_CONTEXT_WINDOW
+    aux_section["compression"] = aux_comp
+    existing["auxiliary"] = aux_section
+
+    # Atomic write so a concurrent AIAgent init never reads a half-written file.
+    fd, tmp_path = tempfile.mkstemp(dir=str(hermes_home), prefix=".config.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(existing, f, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, cfg_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _build_org_diagram(cfg: Dict[str, Any], team_id: str, current_agent: str) -> str:
@@ -281,40 +430,76 @@ def compose_agent_soul(agent_cfg: Dict[str, Any], full_config: Optional[Dict[str
 # Config I/O
 # ---------------------------------------------------------------------------
 def load_agents_config() -> Dict[str, Any]:
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    if not AGENTS_CONFIG_PATH.exists():
-        default_cfg = _default_config()
-        with open(AGENTS_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(default_cfg, f, indent=4)
-        return default_cfg
+    global _config_cache, _config_cache_key
+    with _config_lock:
+        DATA_ROOT.mkdir(parents=True, exist_ok=True)
+        if not AGENTS_CONFIG_PATH.exists():
+            default_cfg = _default_config()
+            _save_full_config(default_cfg)  # populates the cache
+            return _deep_copy_config(default_cfg)
 
-    try:
-        with open(AGENTS_CONFIG_PATH, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception as e:
-        log.error("Failed to load agents config: %s. Returning default.", e)
-        return _default_config()
+        # Fast path: file unchanged since we last parsed it.
+        key = _config_file_key()
+        if key is not None and key == _config_cache_key and _config_cache is not None:
+            return _deep_copy_config(_config_cache)
 
-    # Detect legacy flat format (has string keys at top level with agent dict values)
-    if "teams" not in raw and "agents" not in raw:
-        migrated = _migrate_legacy_config(raw)
-        _save_full_config(migrated)
-        return migrated
+        try:
+            with open(AGENTS_CONFIG_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            log.error("Failed to load agents config: %s. Returning default.", e)
+            return _default_config()
 
-    # Ensure both keys exist even if someone corrupted the file
-    if "teams" not in raw:
-        raw["teams"] = {}
-    if "agents" not in raw:
-        raw["agents"] = {}
+        # Detect legacy flat format (has string keys at top level with agent dict values)
+        if "teams" not in raw and "agents" not in raw:
+            migrated = _migrate_legacy_config(raw)
+            _save_full_config(migrated)  # refreshes cache + key
+            return _deep_copy_config(migrated)
 
-    # Migrate v1 -> v2 if needed
-    raw = _migrate_v1_to_v2(raw)
-    return raw
+        # Ensure both keys exist even if someone corrupted the file
+        if "teams" not in raw:
+            raw["teams"] = {}
+        if "agents" not in raw:
+            raw["agents"] = {}
+
+        # Migrate v1 -> v2 if needed (writes file + refreshes cache when it changes)
+        raw = _migrate_v1_to_v2(raw)
+
+        # Cache the parsed result keyed on the file's current stat.
+        _config_cache = _deep_copy_config(raw)
+        _config_cache_key = _config_file_key()
+        return _deep_copy_config(raw)
 
 
 def _save_full_config(cfg: Dict[str, Any]) -> None:
-    with open(AGENTS_CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=4)
+    """Atomically persist the full config.
+
+    Writes to a temp file in the same directory and os.replace()s it into
+    place so a concurrent reader (or a crash mid-write) can never observe a
+    half-written / truncated agents_config.json. The lock serializes writers
+    so two concurrent saves cannot interleave.
+    """
+    with _config_lock:
+        DATA_ROOT.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(DATA_ROOT), prefix=".agents_config.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, AGENTS_CONFIG_PATH)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        # Keep the read cache hot and consistent with what we just wrote.
+        global _config_cache, _config_cache_key
+        _config_cache = _deep_copy_config(cfg)
+        _config_cache_key = _config_file_key()
 
 
 def save_agent_config(agent_name: str, cfg: Dict[str, Any]) -> None:

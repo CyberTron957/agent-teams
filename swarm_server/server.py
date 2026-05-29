@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict
 
@@ -10,14 +11,19 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from swarm_server.agent import AgentDaemon
+from swarm_server.agent import AgentDaemon, AGENT_STATE_ASKING_HUMAN
 from swarm_server.config import (
     AGENTS,
+    CORS_ALLOWED_ORIGINS,
     DASHBOARD_DIR,
     LITELLM_API_BASE,
     MONITORING_DB,
+    MONITORING_MAX_EVENTS,
+    MONITORING_MAX_MESSAGES,
+    MONITORING_PRUNE_INTERVAL_SECONDS,
     SERVER_HOST,
     SERVER_PORT,
+    SWARM_API_KEY,
     add_agent_peer,
     create_agent,
     create_team,
@@ -43,17 +49,74 @@ log = logging.getLogger("swarm.server")
 # ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Hermes Swarm Server", version="0.4.0")
+daemons: Dict[str, AgentDaemon] = {}
+
+
+async def _periodic_monitoring_prune():
+    """Keep monitoring.db bounded over long 24/7 runs."""
+    while True:
+        await asyncio.sleep(MONITORING_PRUNE_INTERVAL_SECONDS)
+        try:
+            monitor_db.prune(MONITORING_MAX_EVENTS, MONITORING_MAX_MESSAGES)
+        except Exception as e:
+            log.warning("[Prune] %s", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ---- startup ----
+    _ws_mod._main_event_loop = asyncio.get_running_loop()
+    log.info("[Startup] Main event loop captured")
+
+    # NOTE: queue DBs are intentionally NOT deleted here anymore. Each
+    # AgentDaemon recovers its own in-flight ('processing') tasks on construction
+    # (queue.recover_processing()), so a restart resumes work instead of losing it.
+    cfg = load_agents_config()
+    loop = asyncio.get_running_loop()
+    for agent_name, agent_cfg in cfg["agents"].items():
+        register_agent_daemon(agent_name, agent_cfg, loop)
+
+    prune_task = loop.create_task(_periodic_monitoring_prune())
+    log.info("[Startup] All agents running. LiteLLM at %s", LITELLM_API_BASE)
+    log.info("[Startup] Dashboard at http://%s:%s/", SERVER_HOST, SERVER_PORT)
+
+    try:
+        yield
+    finally:
+        # ---- shutdown ----
+        prune_task.cancel()
+        for name, daemon in list(daemons.items()):
+            _stop_daemon(daemon)
+        log.info("[Shutdown] All sweep tasks cancelled")
+
+
+app = FastAPI(title="Hermes Swarm Server", version="0.5.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-daemons: Dict[str, AgentDaemon] = {}
+
+@app.middleware("http")
+async def _auth_guard(request: Request, call_next):
+    """Optional bearer/API-key auth on mutating endpoints.
+
+    Disabled unless SWARM_API_KEY is set (the server binds localhost). When set,
+    POST/PUT/PATCH/DELETE require either 'Authorization: Bearer <key>' or
+    'X-API-Key: <key>'. Read-only GETs and the dashboard stay open.
+    """
+    if SWARM_API_KEY and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        provided = request.headers.get("x-api-key", "")
+        auth = request.headers.get("authorization", "")
+        if not provided and auth.lower().startswith("bearer "):
+            provided = auth[7:].strip()
+        if provided != SWARM_API_KEY:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +199,7 @@ async def human_response(agent_name: str, request: Request):
     daemon = daemons.get(agent_name)
     if daemon is None:
         return JSONResponse({"error": "agent not found"}, status_code=404)
-    if daemon.state != "asking_human":
+    if daemon.state != AGENT_STATE_ASKING_HUMAN:
         return JSONResponse(
             {"error": f"Agent is not asking human (state: {daemon.state})"},
             status_code=400,
@@ -500,7 +563,7 @@ async def respond_to_human_question(agent_name: str, request: Request):
     answer_question(found_qid, response_text)
 
     # Wake the daemon if it's still waiting
-    if daemon.state == "asking_human":
+    if daemon.state == AGENT_STATE_ASKING_HUMAN:
         daemon.human_response = response_text
         daemon.human_event.set()
         log.info("[Inbox] Response delivered to %s (qid=%s)", agent_name, found_qid)
@@ -521,44 +584,8 @@ async def respond_to_human_question(agent_name: str, request: Request):
     return JSONResponse({
         "success": True,
         "question_id": found_qid,
-        "message": "Response delivered to agent." if daemon.state == "asking_human" else "Response stored (agent already moved on).",
+        "message": "Response delivered to agent." if daemon.state == AGENT_STATE_ASKING_HUMAN else "Response stored (agent already moved on).",
     })
-
-
-# ---------------------------------------------------------------------------
-# Startup / Shutdown
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-async def on_startup():
-    _ws_mod._main_event_loop = asyncio.get_running_loop()
-    log.info("[Startup] Main event loop captured: %s", _ws_mod._main_event_loop)
-
-    from swarm_server.websocket import _broadcast
-
-    cfg = load_agents_config()
-    for agent_name, agent_cfg in cfg["agents"].items():
-        team_id = agent_cfg.get("team_id", "default")
-        db_path = _derive_workspace_path(team_id, agent_name) / f"{agent_name}_queue.db"
-        if db_path.exists():
-            try:
-                db_path.unlink()
-                log.info("[Startup] Cleaned up previous DB for '%s'", agent_name)
-            except Exception as e:
-                log.warning("[Startup] Could not delete DB %s: %s", db_path, e)
-
-    loop = asyncio.get_running_loop()
-    for agent_name, agent_cfg in cfg["agents"].items():
-        register_agent_daemon(agent_name, agent_cfg, loop)
-
-    log.info("[Startup] All agents running. LiteLLM at %s", LITELLM_API_BASE)
-    log.info("[Startup] Dashboard at http://%s:%s/", SERVER_HOST, SERVER_PORT)
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    for name, daemon in list(daemons.items()):
-        _stop_daemon(daemon)
-    log.info("[Shutdown] All sweep tasks cancelled")
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +603,9 @@ def _stop_daemon(daemon: AgentDaemon):
     if daemon._sweep_task and not daemon._sweep_task.done():
         daemon._sweep_task.cancel()
         log.info("[Daemon] Cancelled sweep for '%s'", daemon.name)
+    # Release the agent's dedicated worker thread. wait=False so shutdown never
+    # blocks the event loop on an in-flight (possibly ask_human-blocked) run.
+    daemon._executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _stop_and_unregister_daemon(agent_name: str):

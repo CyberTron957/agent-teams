@@ -1,6 +1,5 @@
 """SQLite-backed task queue per agent."""
 
-import json
 import logging
 import sqlite3
 import threading
@@ -20,8 +19,10 @@ class TaskQueue:
         payload      TEXT NOT NULL,
         status       TEXT NOT NULL DEFAULT 'pending',
         created_at   REAL NOT NULL,
-        processed_at REAL
+        processed_at REAL,
+        retries      INTEGER NOT NULL DEFAULT 0
     );
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -30,11 +31,21 @@ class TaskQueue:
         self._init_db()
 
     def _conn(self):
-        return sqlite3.connect(str(self.db_path), timeout=10, check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), timeout=10, check_same_thread=False)
+        # WAL lets readers and a writer coexist without "database is locked";
+        # busy_timeout makes brief write contention wait instead of erroring.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def _init_db(self):
         with self._conn() as conn:
-            conn.execute(self.SCHEMA)
+            conn.executescript(self.SCHEMA)
+            # Migrate older DBs that predate the retries column.
+            cols = [c[1] for c in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+            if "retries" not in cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN retries INTEGER NOT NULL DEFAULT 0")
             conn.commit()
 
     def enqueue(self, from_agent: str, payload: str) -> str:
@@ -46,14 +57,19 @@ class TaskQueue:
             )
             conn.commit()
         log.info("[Queue] Enqueued task %s from '%s'", task_id[:8], from_agent)
-        # Monitoring log is injected by caller to avoid circular import
         return task_id
 
-    def drain_pending(self) -> List[Dict[str, Any]]:
+    def drain_pending(self, limit: int = 0) -> List[Dict[str, Any]]:
+        """Atomically claim up to ``limit`` pending tasks (0 = no cap).
+
+        The cap is backpressure: it bounds how many messages get concatenated
+        into a single LLM turn so a flood can't blow the context window.
+        """
         with self._lock, self._conn() as conn:
-            rows = conn.execute(
-                "SELECT id, from_agent, payload FROM tasks WHERE status='pending' ORDER BY created_at"
-            ).fetchall()
+            sql = "SELECT id, from_agent, payload, retries FROM tasks WHERE status='pending' ORDER BY created_at"
+            if limit and limit > 0:
+                sql += f" LIMIT {int(limit)}"
+            rows = conn.execute(sql).fetchall()
             if rows:
                 ids = [r[0] for r in rows]
                 placeholders = ",".join("?" * len(ids))
@@ -62,12 +78,51 @@ class TaskQueue:
                     [time.time()] + ids,
                 )
                 conn.commit()
-        return [{"id": r[0], "from_agent": r[1], "payload": r[2]} for r in rows]
+        return [{"id": r[0], "from_agent": r[1], "payload": r[2], "retries": r[3]} for r in rows]
 
     def mark_done(self, task_id: str):
         with self._lock, self._conn() as conn:
             conn.execute("UPDATE tasks SET status='done' WHERE id=?", (task_id,))
             conn.commit()
+
+    def requeue(self, task_ids: List[str]):
+        """Return tasks to 'pending' and bump their retry counter (after a failure)."""
+        if not task_ids:
+            return
+        with self._lock, self._conn() as conn:
+            placeholders = ",".join("?" * len(task_ids))
+            conn.execute(
+                f"UPDATE tasks SET status='pending', processed_at=NULL, retries=retries+1 "
+                f"WHERE id IN ({placeholders})",
+                task_ids,
+            )
+            conn.commit()
+
+    def mark_failed(self, task_ids: List[str]):
+        """Dead-letter tasks that exhausted their retries."""
+        if not task_ids:
+            return
+        with self._lock, self._conn() as conn:
+            placeholders = ",".join("?" * len(task_ids))
+            conn.execute(
+                f"UPDATE tasks SET status='failed', processed_at=? WHERE id IN ({placeholders})",
+                [time.time()] + task_ids,
+            )
+            conn.commit()
+
+    def recover_processing(self) -> int:
+        """Requeue tasks left 'processing' by a previous run that crashed/restarted.
+
+        Without this, a restart would either lose in-flight tasks (old behavior
+        deleted the DB) or strand them forever in 'processing'. Returns the count
+        recovered.
+        """
+        with self._lock, self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET status='pending', processed_at=NULL WHERE status='processing'"
+            )
+            conn.commit()
+            return cur.rowcount or 0
 
     def get_pending_count(self) -> int:
         with self._lock, self._conn() as conn:
