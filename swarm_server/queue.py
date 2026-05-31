@@ -98,6 +98,23 @@ class TaskQueue:
             )
             conn.commit()
 
+    def requeue_no_penalty(self, task_ids: List[str]):
+        """Return tasks to 'pending' WITHOUT bumping the retry counter.
+
+        Used for infrastructure failures (LLM proxy down, billing exhausted)
+        that are not the task's fault — the work should wait for recovery and
+        resume, not burn its retry budget and dead-letter during an outage."""
+        if not task_ids:
+            return
+        with self._lock, self._conn() as conn:
+            placeholders = ",".join("?" * len(task_ids))
+            conn.execute(
+                f"UPDATE tasks SET status='pending', processed_at=NULL "
+                f"WHERE id IN ({placeholders})",
+                task_ids,
+            )
+            conn.commit()
+
     def mark_failed(self, task_ids: List[str]):
         """Dead-letter tasks that exhausted their retries."""
         if not task_ids:

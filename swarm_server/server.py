@@ -87,6 +87,12 @@ async def lifespan(app: FastAPI):
         prune_task.cancel()
         for name, daemon in list(daemons.items()):
             _stop_daemon(daemon)
+        # Stop per-team browsers (their on-disk profiles persist for next run).
+        try:
+            from swarm_server.browser_pool import team_browser_manager
+            team_browser_manager.shutdown_all()
+        except Exception as e:
+            log.warning("[Shutdown] team browser shutdown failed: %s", e)
         log.info("[Shutdown] All sweep tasks cancelled")
 
 
@@ -573,19 +579,37 @@ async def respond_to_human_question(agent_name: str, request: Request):
             status_code=404,
         )
 
+    # Grab the question text (for the resume-task path) before marking answered.
+    from swarm_server.tools import _pending_human_questions, _pending_lock as _pl
+    with _pl:
+        q_obj = _pending_human_questions.get(found_qid) or {}
+        question_text = q_obj.get("question", "")
+
     # Update registry
     answer_question(found_qid, response_text)
 
-    # Wake the daemon if it's still waiting
+    # Deliver the answer. Two cases:
     if daemon.state == AGENT_STATE_ASKING_HUMAN:
+        # (a) Agent is still blocking inside ask_human → resume it in-turn.
         daemon.human_response = response_text
         daemon.human_event.set()
-        log.info("[Inbox] Response delivered to %s (qid=%s)", agent_name, found_qid)
+        log.info("[Inbox] Response delivered in-turn to %s (qid=%s)", agent_name, found_qid)
     else:
-        log.warning(
-            "[Inbox] Agent %s not in asking_human state (state=%s). Response stored but not delivered.",
-            agent_name, daemon.state,
+        # (b) Agent already ended its turn (the in-turn wait elapsed). Re-deliver
+        # the answer as a NEW TASK so it wakes up and resumes the blocked action
+        # (e.g. log in and publish). This is what lets the swarm survive a human
+        # who answers hours later — the request never gets lost.
+        daemon.human_event.set()  # harmless if nothing is waiting
+        resume_msg = (
+            "✅ The human answered a question you were blocked on.\n\n"
+            f"Your question: {question_text}\n"
+            f"Human's answer: {response_text}\n\n"
+            "Resume the action you were blocked on and COMPLETE it now "
+            "(e.g. use the credentials to log in via the browser and publish). "
+            "Do not just acknowledge — finish the task and report what went live."
         )
+        daemon.ingest_task("human", resume_msg)
+        log.info("[Inbox] Response re-delivered as resume-task to %s (qid=%s)", agent_name, found_qid)
 
     from swarm_server.websocket import _broadcast
 

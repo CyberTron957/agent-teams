@@ -12,6 +12,14 @@ from swarm_server.websocket import _broadcast
 
 log = logging.getLogger("swarm.tools")
 
+# How long ask_human blocks the worker thread waiting for an in-turn answer.
+# On elapse the question stays PENDING (not failed) and the answer is re-delivered
+# later as a task, so the agent resumes even if the human was away for hours.
+# Default 6h: the human usually answers in-turn (smooth resume) rather than the
+# agent ending its turn and resuming later via the re-delivered task.
+import os as _os
+_ASK_HUMAN_WAIT_SECONDS = int(_os.environ.get("SWARM_ASK_HUMAN_WAIT_SECONDS", "21600"))
+
 # Maps agent_name -> AgentDaemon instance (populated at runtime by server.py)
 _daemon_registry: Dict[str, Any] = {}
 
@@ -239,7 +247,11 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
 
     daemon.human_event.clear()
     daemon.human_response = None
-    daemon.human_event.wait(timeout=300)  # 5 min timeout
+    # Block the worker thread for this long waiting for an in-turn answer (smooth
+    # path when a human is present). If it elapses, we DON'T fail — the question
+    # stays pending and a late answer is re-delivered as a task. Kept modest so a
+    # single blocked agent never parks its thread for hours.
+    daemon.human_event.wait(timeout=_ASK_HUMAN_WAIT_SECONDS)
 
     with daemon._lock:
         daemon.state = AGENT_STATE_BUSY
@@ -249,22 +261,30 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
         q = _pending_human_questions.get(qid)
         if q and q["status"] == "answered":
             daemon.human_response = q["response"]
-        elif q and q["status"] == "pending":
-            q["status"] = "timed_out"
+        # On timeout we deliberately LEAVE the question 'pending' (do NOT mark it
+        # timed_out): it stays open in the human's inbox indefinitely, and when
+        # they eventually answer, the inbox endpoint re-delivers the response to
+        # this agent as a new task (see respond_to_human_question). This is what
+        # makes a 24/7 swarm survive a human who is away for hours.
 
     if not daemon.human_event.is_set():
-        log.warning("[%s] [ask_human] Timeout — no human response in 300s", daemon.name)
+        log.info(
+            "[%s] [ask_human] No response in %ds — question stays pending; agent "
+            "ends turn and will be re-notified when answered", daemon.name, _ASK_HUMAN_WAIT_SECONDS,
+        )
         # NOTE: deliberately do NOT set state to "idle" here. This handler runs
         # *inside* run_conversation on the agent's worker thread, and that
-        # conversation is still in flight (the LLM receives this error and keeps
-        # going). State was restored to "busy" just above; leaving it that way
-        # prevents the sweep loop from launching a SECOND concurrent
-        # run_conversation on the same agent. The sweep loop's finally-block is
-        # the single owner of the busy→idle transition and resets it once the
-        # run actually returns.
+        # conversation is still in flight. The sweep loop's finally-block is the
+        # single owner of the busy→idle transition.
         return json.dumps({
-            "success": False,
-            "error": "No human responded within 5 minutes. Proceed with your best judgment or retry later.",
+            "success": True,
+            "status": "waiting_for_human",
+            "message": (
+                "Your question is saved in the human's inbox (id=" + qid + ") and "
+                "will NOT expire. The moment the human answers, "
+                "you will receive their response as a new task and resume exactly "
+                "where you left off (e.g. log in and publish). Stop here."
+            ),
         })
 
     log.info("[%s] [ask_human] Response received: %s", daemon.name, daemon.human_response)
@@ -294,27 +314,39 @@ def _log_changes_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "Empty log entry."})
 
     # Get team_id from config
-    from swarm_server.config import load_agents_config, _get_team_workspace_path
+    from swarm_server.config import (
+        load_agents_config,
+        _get_team_workspace_path,
+        _derive_workspace_path,
+    )
 
     cfg = load_agents_config()
     caller_cfg = cfg["agents"].get(caller, {})
     team_id = caller_cfg.get("team_id", "default")
 
-    # Append to team agent_log.md
-    team_ws = _get_team_workspace_path(team_id)
-    agent_log = team_ws / "agent_log.md"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"# [{timestamp}] {caller}: {entry}\n\n"
 
-    try:
-        if agent_log.exists():
-            with open(agent_log, "a", encoding="utf-8") as f:
+    def _append(path, header: str) -> None:
+        """Append the entry to a log file, seeding a header if it's new."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            with open(path, "a", encoding="utf-8") as f:
                 f.write(log_line)
         else:
-            with open(agent_log, "w", encoding="utf-8") as f:
-                f.write("# Team Activity Log\n\n")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(header)
                 f.write(log_line)
-        log.info("[log_changes] %s logged: %s", caller, entry[:80])
+
+    # Write to BOTH the shared team log (the canonical project changelog every
+    # teammate reads) AND the caller's own per-agent log (their personal
+    # activity trail). One log_changes call -> two destinations.
+    team_log = _get_team_workspace_path(team_id) / "agent_log.md"
+    agent_log = _derive_workspace_path(team_id, caller) / "agent_log.md"
+    try:
+        _append(team_log, "# Team Activity Log\n\n")
+        _append(agent_log, f"# {caller} Activity Log\n\n")
+        log.info("[log_changes] %s logged (team + self): %s", caller, entry[:80])
     except Exception as e:
         log.warning("[log_changes] Failed to write log for %s: %s", caller, e)
         return json.dumps({"success": False, "error": f"Failed to write log: {e}"})

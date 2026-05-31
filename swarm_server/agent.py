@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -11,16 +12,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from swarm_server.config import (
+    AUTONOMOUS_HEARTBEAT_PROMPT,
+    AUTONOMOUS_HEARTBEAT_SECONDS,
     LITELLM_API_BASE,
+    LLM_ERROR_EMIT_THROTTLE_SECONDS,
     MAX_BATCH_SIZE,
     MAX_TASK_RETRIES,
     SWEEP_INTERVAL_SECONDS,
     _derive_workspace_path,
     compose_agent_soul,
+    compose_soul_identity,
     load_agents_config,
     save_agent_config,
     write_agent_hermes_config,
 )
+from swarm_server.browser_pool import team_browser_manager
 from swarm_server.monitoring import monitor_db
 from swarm_server.queue import TaskQueue
 from swarm_server.tools import (
@@ -120,6 +126,61 @@ class AgentDaemon:
         self.human_response = None
         self.next_sweep_at = 0.0
         self._stop_requested = False
+        # Hermes reports session-CUMULATIVE token counts; we track the last
+        # total so each batch can log its real delta (not just a char estimate).
+        self._last_total_tokens = 0
+        # 24/7 autonomy: when True, this daemon self-injects a continue-mission
+        # task after AUTONOMOUS_HEARTBEAT_SECONDS of idle (empty queue). Set per
+        # agent via cfg["autonomous"] — typically only the team coordinator.
+        self._autonomous = bool(cfg.get("autonomous", False))
+        # Wall-clock of the last time this agent actually did work. Seeds to now
+        # so a freshly-started autonomous agent waits one full interval before
+        # its first self-driven cycle (gives a human time to send the opener).
+        self._last_active = time.time()
+        # Throttle for the "LLM provider unreachable" UI message so a sustained
+        # outage doesn't post one error per 10s sweep tick.
+        self._last_llm_error_emit = 0.0
+
+    @staticmethod
+    def _is_infra_failure(err: str) -> bool:
+        """True when a failed turn is environmental (provider down, billing,
+        timeout) rather than the task's fault — these should wait for recovery
+        instead of burning the retry budget and dead-lettering during an outage."""
+        e = (err or "").lower()
+        return any(s in e for s in (
+            "connection error", "apiconnection", "connection refused",
+            "billing or credits", "credits exhausted", "timeout", "timed out",
+            "max retries", "failed after", "service unavailable", "502", "503", "504",
+        ))
+
+    def _write_soul_md(self, content: str) -> None:
+        """Atomically write this agent's SOUL.md (its lead identity block).
+
+        Overwrites the generic SOUL.md Hermes auto-seeds into a fresh
+        HERMES_HOME so the cached system prompt leads with the agent's ROLE
+        instead of the stock "You are Hermes Agent…" template. Atomic so a
+        concurrent AIAgent init can never read a half-written file.
+        """
+        soul_path = self._hermes_home / "SOUL.md"
+        try:
+            self._hermes_home.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._hermes_home), prefix=".SOUL.", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, soul_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            log.warning("[%s] Could not write SOUL.md: %s", self.name, e)
 
     def _ensure_agent(self):
         if self._ai_agent is not None:
@@ -133,15 +194,55 @@ class AgentDaemon:
 
                 os.environ["HERMES_HOME"] = str(self._hermes_home)
 
+                # Bring up this team's shared, persistent browser and point this
+                # agent at it via browser.cdp_url. All agents in the team share
+                # one Chrome (same cookies/logins) whose profile lives on disk,
+                # so the session survives restarts. Best-effort: if no Chromium
+                # is available, cdp_url stays None and the agent falls back to
+                # the per-agent local browser.
+                team_id = self.cfg.get("team_id", "default")
+                cdp_url = team_browser_manager.ensure_team_browser(team_id)
+
                 # Enable Hermes' built-in context/session compression for this
                 # agent. Must be written before AIAgent() so init_agent picks it
                 # up from {HERMES_HOME}/config.yaml.
-                write_agent_hermes_config(self._hermes_home)
+                write_agent_hermes_config(self._hermes_home, cdp_url=cdp_url)
+
+                # CRITICAL: bind the session DB to THIS agent's home explicitly.
+                # Hermes computes `DEFAULT_DB_PATH = get_hermes_home()/state.db`
+                # ONCE at module-import time, and `SessionDB()` with no arg uses
+                # that frozen constant — it ignores both os.environ["HERMES_HOME"]
+                # AND the ContextVar override. Without an explicit path, every
+                # agent in a server run writes to whichever home was active at
+                # first import, so sessions cross-contaminate and an agent loses
+                # its history on restart (observed: content-writer and
+                # social-media-manager had NO state.db of their own — their turns
+                # were stranded in cmo's/seo's DBs). Passing session_db pins each
+                # agent to its own state.db, race-free.
+                agent_session_db = None
+                try:
+                    from hermes_state import SessionDB
+
+                    agent_session_db = SessionDB(db_path=self._hermes_home / "state.db")
+                except Exception as e:
+                    log.error(
+                        "[%s] Could not open isolated SessionDB (falling back to default): %s",
+                        self.name, e,
+                    )
 
                 # Prepare config with agent_id for soul composition
                 soul_cfg = dict(self.cfg)
                 soul_cfg["agent_id"] = self.name
                 full_cfg = load_agents_config()
+
+                # Write this agent's ROLE as SOUL.md so Hermes loads it as the
+                # lead identity block of the (cached) system prompt — replacing
+                # the generic auto-seeded "You are Hermes Agent…" template that
+                # Hermes drops into every fresh HERMES_HOME. Must be written
+                # before AIAgent() so load_soul_md() picks it up. The role is
+                # therefore NOT repeated in the ephemeral prompt (include_role
+                # =False) to avoid duplicating it in every turn.
+                self._write_soul_md(compose_soul_identity(soul_cfg))
 
                 self._ai_agent = AIAgent(
                     base_url=LITELLM_API_BASE,
@@ -151,7 +252,10 @@ class AgentDaemon:
                     skip_memory=False,
                     skip_context_files=False,
                     quiet_mode=True,
-                    ephemeral_system_prompt=compose_agent_soul(soul_cfg, full_cfg),
+                    ephemeral_system_prompt=compose_agent_soul(
+                        soul_cfg, full_cfg, include_role=False
+                    ),
+                    session_db=agent_session_db,
                 )
                 _register_custom_tools()
 
@@ -363,6 +467,7 @@ class AgentDaemon:
                 pass
             self._wake.clear()
             await self._sweep()
+            self._maybe_autonomous_heartbeat()
 
     async def _sweep(self):
         # Claim a bounded batch first. If there's nothing to do, stay idle
@@ -387,6 +492,9 @@ class AgentDaemon:
         try:
             await self._process_tasks_batch(tasks)
         finally:
+            # Mark activity so the autonomous heartbeat measures idle time from
+            # the end of real work, not from server start.
+            self._last_active = time.time()
             with self._lock:
                 self.state = AGENT_STATE_IDLE
                 self.next_sweep_at = time.time() + SWEEP_INTERVAL_SECONDS
@@ -397,6 +505,32 @@ class AgentDaemon:
                     self._wake.set()
             except Exception:
                 pass
+
+    def _maybe_autonomous_heartbeat(self) -> None:
+        """Self-inject a continue-mission task when idle (24/7 autonomy).
+
+        Fires only for agents flagged autonomous (typically the team
+        coordinator), and only when: not busy, the queue is empty, and at least
+        AUTONOMOUS_HEARTBEAT_SECONDS have elapsed since the last real work. The
+        coordinator then reviews the mission + what's done and delegates the
+        next increment, which keeps the whole team working without a human in
+        the loop. Resetting _last_active here prevents back-to-back refiring.
+        """
+        if not self._autonomous or self._stop_requested:
+            return
+        if self.state == AGENT_STATE_BUSY:
+            return
+        try:
+            if self.queue.get_pending_count() > 0:
+                return
+        except Exception:
+            return
+        if time.time() - self._last_active < AUTONOMOUS_HEARTBEAT_SECONDS:
+            return
+        self._last_active = time.time()
+        log.info("[%s] Autonomous heartbeat — injecting continue-mission task", self.name)
+        monitor_db.log_event(self.name, "autonomous_heartbeat", data={})
+        self.ingest_task("autonomous", AUTONOMOUS_HEARTBEAT_PROMPT)
 
     def _run_conversation_blocking(self, combined: str) -> Dict[str, Any]:
         """Synchronous body executed on this agent's dedicated worker thread.
@@ -410,6 +544,10 @@ class AgentDaemon:
         token = _set_hermes_home_override(self._hermes_home)
         try:
             self._ensure_agent()
+            # Heal a crashed team browser before the turn. Relaunch reuses the
+            # same port, so the cdp_url already in config.yaml stays valid — no
+            # rewrite needed on the happy path (this is just a health probe).
+            team_browser_manager.ensure_team_browser(self.cfg.get("team_id", "default"))
             history = self._load_session_from_db()
             return self._ai_agent.run_conversation(
                 user_message=combined,
@@ -447,6 +585,82 @@ class AgentDaemon:
             # Compaction during the run rotates session_id; persist it so the
             # next sweep (and a restart) resumes from the compacted session.
             self._persist_session_id_if_rotated()
+
+            # A hard LLM failure (proxy down, billing exhausted, repeated stream
+            # drops) does NOT raise — Hermes returns failed=True with an empty or
+            # partial turn. The old code fell straight through the success path:
+            # it logged nothing to the UI (so the agent just flickered busy->idle
+            # with no message) and marked the task DONE, silently consuming the
+            # work. Surface it as a visible error + requeue so it isn't lost.
+            if response.get("failed"):
+                err = str(response.get("error") or response.get("final_response") or "LLM call failed")
+                log.error("[%s] LLM turn failed (no response produced): %s", self.name, err[:200])
+                infra = self._is_infra_failure(err)
+                # Surface it in the UI, but throttle during a sustained outage so
+                # we don't spam the monitoring log with one error per 10s tick.
+                now = time.time()
+                if now - self._last_llm_error_emit >= LLM_ERROR_EMIT_THROTTLE_SECONDS:
+                    self._last_llm_error_emit = now
+                    if infra:
+                        err_content = (
+                            f"⚠️ LLM provider unreachable — turn produced no response. "
+                            f"Holding work until it recovers (auto-resumes). Detail: {err}"
+                        )
+                    else:
+                        err_content = f"⚠️ LLM call failed — no response produced this turn: {err}"
+                    monitor_db.log_message(self.name, "system", err_content, ",".join(task_ids))
+                    _broadcast("message_logged", {
+                        "agent_name": self.name,
+                        "role": "system",
+                        "content": err_content,
+                        "task_id": task_preview,
+                        "timestamp": time.time(),
+                    })
+                monitor_db.log_event(
+                    self.name, "error",
+                    data={"error": err[:500], "task_ids": task_ids,
+                          "kind": "llm_infra" if infra else "llm_failure"},
+                )
+                _broadcast("error", {
+                    "agent_name": self.name,
+                    "task_ids": task_ids,
+                    "error": err[:500],
+                    "timestamp": time.time(),
+                })
+                if infra:
+                    # Not the task's fault — wait for recovery without burning the
+                    # retry budget. Retries on the natural sweep tick (no wake), so
+                    # the work resumes the moment the provider is back.
+                    self.queue.requeue_no_penalty(task_ids)
+                    log.warning("[%s] Held %d task(s) for provider recovery (no penalty)",
+                                self.name, len(task_ids))
+                else:
+                    self._requeue_or_deadletter(tasks)
+                return
+
+            # Record REAL token usage. Hermes returns session-cumulative counts,
+            # so we log this batch's delta plus the running total + cost — actual
+            # numbers from the provider, not the char-based message estimate.
+            try:
+                total = int(response.get("total_tokens", 0) or 0)
+                delta = total - self._last_total_tokens
+                if delta < 0:  # session rotated/compacted -> counter reset
+                    delta = total
+                self._last_total_tokens = total
+                monitor_db.log_event(
+                    self.name, "token_usage",
+                    data={
+                        "delta_tokens": delta,
+                        "total_tokens": total,
+                        "input_tokens": int(response.get("input_tokens", 0) or 0),
+                        "output_tokens": int(response.get("output_tokens", 0) or 0),
+                        "cache_read_tokens": int(response.get("cache_read_tokens", 0) or 0),
+                        "estimated_cost_usd": response.get("estimated_cost_usd", 0),
+                    },
+                )
+            except Exception as e:
+                log.debug("[%s] token usage logging failed: %s", self.name, e)
+
             new_messages = response.get("messages", [])
             final = str(response.get("final_response", ""))
             log.info("[%s] Batch complete. Response: %s", self.name, final[:200])
@@ -501,21 +715,27 @@ class AgentDaemon:
             })
             # Don't strand tasks in 'processing' forever (the old zombie bug).
             # Requeue for another attempt; dead-letter once retries are exhausted.
-            retry_ids = [t["id"] for t in tasks if int(t.get("retries", 0)) + 1 <= MAX_TASK_RETRIES]
-            dead_ids = [t["id"] for t in tasks if int(t.get("retries", 0)) + 1 > MAX_TASK_RETRIES]
-            if retry_ids:
-                self.queue.requeue(retry_ids)
-                log.warning("[%s] Requeued %d task(s) for retry", self.name, len(retry_ids))
-                self._signal_wake()
-            if dead_ids:
-                self.queue.mark_failed(dead_ids)
-                log.error("[%s] %d task(s) exhausted retries -> dead-letter", self.name, len(dead_ids))
-                monitor_db.log_event(self.name, "task_failed", data={"task_ids": dead_ids})
-                _broadcast("task_failed", {
-                    "agent_name": self.name,
-                    "task_ids": dead_ids,
-                    "timestamp": time.time(),
-                })
+            self._requeue_or_deadletter(tasks)
+
+    def _requeue_or_deadletter(self, tasks: List[Dict[str, Any]]) -> None:
+        """Requeue failed tasks for another attempt; dead-letter once retries
+        are exhausted. Shared by the exception path and the failed-turn path so
+        a batch is never silently consumed (the old zombie/lost-work bug)."""
+        retry_ids = [t["id"] for t in tasks if int(t.get("retries", 0)) + 1 <= MAX_TASK_RETRIES]
+        dead_ids = [t["id"] for t in tasks if int(t.get("retries", 0)) + 1 > MAX_TASK_RETRIES]
+        if retry_ids:
+            self.queue.requeue(retry_ids)
+            log.warning("[%s] Requeued %d task(s) for retry", self.name, len(retry_ids))
+            self._signal_wake()
+        if dead_ids:
+            self.queue.mark_failed(dead_ids)
+            log.error("[%s] %d task(s) exhausted retries -> dead-letter", self.name, len(dead_ids))
+            monitor_db.log_event(self.name, "task_failed", data={"task_ids": dead_ids})
+            _broadcast("task_failed", {
+                "agent_name": self.name,
+                "task_ids": dead_ids,
+                "timestamp": time.time(),
+            })
 
     def start_sweep(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop

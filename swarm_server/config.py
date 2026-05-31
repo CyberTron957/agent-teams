@@ -12,6 +12,45 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("swarm.config")
 
+
+# Web search backend for all agents. "ddgs" = DuckDuckGo via the `ddgs` Python
+# package — zero API key, near-zero RAM (SearXNG was tried but its multi-engine
+# aggregator OOM-crashed the host). The ddgs Hermes plugin auto-registers when
+# the package is importable; we ALSO pin it explicitly in each agent's
+# config.yaml (web.search_backend) so resolution never silently falls through to
+# an unconfigured paid backend.
+WEB_SEARCH_BACKEND = "ddgs"
+
+
+def _ensure_full_path() -> None:
+    """Guarantee a complete PATH for tool subprocesses spawned by Hermes.
+
+    Hermes' file/search tools shell out to `rg`/`grep`/`find` and locate them via
+    `shutil.which`, which reads os.environ["PATH"]. When the server is launched
+    from a context with a stripped PATH (e.g. a bare GUI/launchd invocation), that
+    lookup fails and `search_files` reports "requires ripgrep (rg) or grep" even
+    though the binaries are installed — observed in the agent transcripts, where
+    every search_files call died and agents wasted turns falling back to a login
+    shell. We prepend the standard bin dirs (idempotently) so spawned subprocesses
+    inherit a usable PATH regardless of how the server was started.
+    """
+    standard_dirs = [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    seen = set(parts)
+    missing = [d for d in standard_dirs if d not in seen and os.path.isdir(d)]
+    if missing:
+        os.environ["PATH"] = os.pathsep.join(missing + parts) if parts else os.pathsep.join(missing)
+        log.info("PATH augmented with %s", ", ".join(missing))
+
 # Serializes all reads/writes of agents_config.json across threads. Reentrant
 # because the read path (load_agents_config) may trigger a migration write
 # (_save_full_config) within the same call.
@@ -68,17 +107,96 @@ SWEEP_INTERVAL_SECONDS = 10
 # just under) your LiteLLM backing model's real window. Must be >= 64000
 # (Hermes' MINIMUM_CONTEXT_LENGTH) or AIAgent init raises.
 COMPRESSION_ENABLED = True
-AGENT_CONTEXT_WINDOW = 128000
-COMPRESSION_THRESHOLD = 0.5          # compact at ~50% of the window
+AGENT_CONTEXT_WINDOW = 256000
+COMPRESSION_THRESHOLD = 0.75          # compact at ~75% of the window
 COMPRESSION_TARGET_RATIO = 0.20      # summary budget as a fraction of compacted content
 COMPRESSION_PROTECT_FIRST_N = 3      # head turns kept verbatim (besides system prompt)
 COMPRESSION_PROTECT_LAST_N = 12      # recent tail turns kept verbatim
+# Hard backstop: force compaction once a session exceeds this many messages,
+# even if the token estimate hasn't crossed the threshold. Stops a session from
+# accumulating hundreds of small turns that never trip the token check.
+COMPRESSION_HYGIENE_HARD_MESSAGE_LIMIT = 400
+
+# ---------------------------------------------------------------------------
+# Autonomous 24/7 operation
+# ---------------------------------------------------------------------------
+# The swarm is task-queue-driven: an agent wakes on a task, processes it, then
+# goes idle. That means a team goes DORMANT after finishing a brief. To run
+# 24/7, mark a coordinator agent with cfg["autonomous"]=True: its daemon then
+# self-injects a "continue the mission" task whenever it has been idle (empty
+# queue, not busy) for AUTONOMOUS_HEARTBEAT_SECONDS. The coordinator reviews the
+# mission + what's already done and delegates the next high-value increment.
+# Specialists stay reactive (autonomous=False) so the team doesn't spin N
+# independent loops — one driver pulls the whole team.
+#
+# COST WARNING: each heartbeat cycle consumes tokens (the last full GTM cycle
+# was ~4.8M tokens). Tune the interval to your budget. Pause by setting the
+# agent's autonomous flag False, stopping its daemon, or stopping the server.
+# Override the interval at launch with SWARM_HEARTBEAT_SECONDS.
+AUTONOMOUS_HEARTBEAT_SECONDS = int(os.environ.get("SWARM_HEARTBEAT_SECONDS", "1800"))
+
+AUTONOMOUS_HEARTBEAT_PROMPT = (
+    "[AUTONOMOUS HEARTBEAT — no human task is queued; you run 24/7]\n"
+    "Your goal THIS cycle is to ship something LIVE — not to write another plan "
+    "or refine an existing draft. Success = what went public this cycle.\n\n"
+    "1. PUBLISH FIRST: what content/assets are already DRAFTED but not yet posted "
+    "or sent? (skim the changelog ../agent_log.md and the specialists' outputs/). "
+    "Unpublished work is your #1 priority — get it LIVE via the browser: have the "
+    "right specialist post it to LinkedIn/Instagram/X/Facebook, send the email, or "
+    "publish the blog post.\n"
+    "2. IF BLOCKED ON ACCESS: if posting needs a login/account you don't have, "
+    "call ask_human for that exact credential and stop — do not just re-draft. "
+    "Once the human provides it, the session persists and you publish from then on.\n"
+    "3. ONLY WHEN THE PIPELINE IS FLOWING (nothing valuable sits unpublished) do "
+    "you create the next NEW asset — then publish that too.\n"
+    "Delegate concrete PUBLISH-and-report tasks to specialists, and log_changes "
+    "recording specifically WHAT WENT LIVE this cycle (URLs if available). Do not "
+    "repeat already-published work."
+)
+
+# ---------------------------------------------------------------------------
+# Tool output caps — bound a single tool result's size in the conversation.
+# A browser DOM snapshot or a big file read can be hundreds of KB; with 12
+# protected tail turns, a few of those alone can blow the post-compaction
+# budget and trigger a compaction cascade (observed: the CMO compacted 8x with
+# 4 zero-message cascade sessions). Capping tool output keeps the protected
+# tail small enough that one compaction pass actually fits under the threshold.
+# ---------------------------------------------------------------------------
+TOOL_OUTPUT_MAX_BYTES = 16000
+TOOL_OUTPUT_MAX_LINES = 400
+TOOL_OUTPUT_MAX_LINE_LENGTH = 2000
+
+# ---------------------------------------------------------------------------
+# Disabled toolsets — removed from every agent's tool schema at init.
+# delegate_task (the "delegation" toolset) is intentionally LEFT ENABLED: agents
+# may spawn Hermes sub-agents for parallel subtasks. The old browser-collision
+# problem (concurrent sub-agents driving one shared tab) is fixed instead by
+# browser.fresh_tab_per_task (see write_agent_hermes_config) — each sub-agent's
+# unique task_id now gets its own tab in the shared Chrome. Keep this list as
+# the hook for disabling toolsets in the future.
+# ---------------------------------------------------------------------------
+DISABLED_TOOLSETS: List[str] = []
 
 # ---------------------------------------------------------------------------
 # Queue / sweep behavior
 # ---------------------------------------------------------------------------
 MAX_BATCH_SIZE = 10          # max tasks pulled into one LLM turn (backpressure)
 MAX_TASK_RETRIES = 3         # batch failures requeue up to N times, then -> 'failed' (DLQ)
+LLM_ERROR_EMIT_THROTTLE_SECONDS = 60  # min gap between "provider unreachable" UI errors per agent
+
+# ---------------------------------------------------------------------------
+# Browser tools
+# ---------------------------------------------------------------------------
+# Hermes gates the browser toolset (browser_* + web_search) behind
+# check_browser_requirements(): it needs EITHER a configured cloud provider OR
+# a local Chromium. The swarm server doesn't load ~/.hermes/.env, so the
+# auto-selected cloud provider (Firecrawl) reports unconfigured and short-
+# circuits the check to False — dropping every browser tool AND web_search.
+# Pinning cloud_provider="local" forces _get_cloud_provider() to return None so
+# the check uses the local Chromium instead (install once with
+# `npx playwright install chromium`). Set to "" to leave provider auto-detect
+# alone (cloud mode, needs creds in the server env).
+BROWSER_CLOUD_PROVIDER = "local"
 
 # ---------------------------------------------------------------------------
 # Monitoring retention — rolling cap so monitoring.db stays bounded over 24/7 runs
@@ -107,71 +225,9 @@ CORS_ALLOWED_ORIGINS = [
 # Optional bearer token guarding mutating endpoints. Unset => auth disabled
 # (relies on localhost binding). Set SWARM_API_KEY to require it.
 SWARM_API_KEY = os.environ.get("SWARM_API_KEY", "").strip()
-
-# ---------------------------------------------------------------------------
-# Common SOUL — shared by all agents in the framework
-# Injected at runtime with: {agent_name}, {team_id}, {allowed_peers_list},
-# {workspace_path}, {org_diagram}, {all_team_members}
-# ---------------------------------------------------------------------------
-COMMON_SOUL_TEMPLATE = (
-    "You are an autonomous agent in a multi-agent swarm working on a shared project.\n"
-    "You operate within an async system: tasks arrive in batches and are processed "
-    "every ~{sweep_interval}s. Responses are not immediate.\n\n"
-    "--- SWARM RULES ---\n"
-    "1. NEVER end your turn silently. Always conclude by calling a tool.\n"
-    "   - Prefer 'send_peer_message' to delegate work and keep your context short.\n"
-    "   - Use 'ask_human' only when genuinely stuck, instructions are ambiguous, "
-    "     or a task requires human judgment (approvals, subjective choices).\n"
-    "   - Use 'log_changes' after completing tasks or when something important happens.\n"
-    "2. After calling 'send_peer_message' or 'ask_human', STOP calling tools and end your turn.\n"
-    "3. Process tasks autonomously without asking for permission.\n"
-    "4. Report completions, blockers, or delegation decisions back to the sender.\n"
-    "5. Prefer DELEGATING tasks to other agents over doing everything yourself.\n"
-    "   Offload work to keep your context window short and focused.\n"
-    "6. Keep responses concise — other agents read them in batch.\n\n"
-    "--- WORKSPACE RULES ---\n"
-    "Your dedicated workspace: {workspace_path}\n"
-    "You may ONLY read/write files within this directory or the shared team workspace.\n"
-    "When delegating a file-based task, specify the relative path so the recipient "
-    "knows exactly where to read/write.\n"
-    "When receiving file-based tasks, check your workspace for files at the provided path.\n"
-    "Do NOT write files outside your workspace.\n"
-    "Team workspace.md: {workspace_path}/../workspace.md\n"
-    "  (Read this for project overview and shared context)\n"
-    "Team activity log: {workspace_path}/../agent_log.md\n"
-    "  (Append important events here using log_changes tool)\n\n"
-    "--- COMMUNICATION PROTOCOL ---\n"
-    "Use these formats when messaging peers (soft recommendation, not strict):\n"
-    "  TASK: [description] | OUTPUT: [where to write results] — assign a task\n"
-    "  STATUS: [what you did] | BLOCKERS: [any] — progress update\n"
-    "  RESULT: [output] | NEXT: [recommended action] — deliverable complete\n"
-    "  HELP: [what you need] | CONTEXT: [background] — request assistance\n\n"
-    "Always make it clear: what needs doing and where output should go.\n\n"
-    "--- MEMORY USAGE ---\n"
-    "Use the 'memory' tool to store important facts, decisions, and context:\n"
-    "- Research findings and key data\n"
-    "- Decisions made and their rationale\n"
-    "- Configuration details, API endpoints, credentials\n"
-    "- Reusable patterns or common code snippets\n"
-    "When you learn something important, save it to memory immediately.\n"
-    "When starting a task, search memory for relevant context first.\n\n"
-    "--- PEERS ---\n"
-    "Your agent name: {agent_name}\n"
-    "Your team: {team_id}\n"
-    "Peers you are linked to: {allowed_peers_list}\n"
-    "You may ONLY send messages to agents in your linked peers list.\n\n"
-    "--- TOOL GUIDANCE ---\n"
-    "You have access to the full Hermes tool suite (web search, terminal, file ops, "
-    "browser, todo, memory, code execution, etc.). Use tools relevant to the task.\n"
-    "You do NOT need permission to:\n"
-    "  - Read/write files in your workspace\n"
-    "  - Run terminal commands in your workspace\n"
-    "  - Search the web\n"
-    "  - Delegate to linked peers\n"
-    "You MUST ask a human for approval before:\n"
-    "  - Actions affecting systems outside your workspace\n"
-    "  - Irreversible operations (deleting critical files, pushing code, spending resources)\n"
-)
+# COMMON_SOUL_TEMPLATE lives in swarm_server/soul_template.py so the (long)
+# shared prompt prose can be edited independently of config logic.
+from swarm_server.soul_template import COMMON_SOUL_TEMPLATE  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +243,7 @@ def _get_team_workspace_path(team_id: str) -> Path:
     return WORKSPACE_ROOT / team_id / "workspace"
 
 
-def write_agent_hermes_config(hermes_home: Path) -> None:
+def write_agent_hermes_config(hermes_home: Path, cdp_url: Optional[str] = None) -> None:
     """Write/merge the Hermes config.yaml under an agent's isolated HERMES_HOME.
 
     Enables and tunes the built-in ContextCompressor so long-running agents
@@ -213,10 +269,19 @@ def write_agent_hermes_config(hermes_home: Path) -> None:
         except Exception as e:
             log.warning("Could not parse existing %s (%s) — rewriting", cfg_path, e)
 
+    # Pin the model to the LiteLLM proxy. Beyond context_length, we set
+    # default/provider/base_url/api_key so Hermes' auxiliary client can resolve
+    # "the main model" (auxiliary_client._read_main_model + _resolve_custom_
+    # runtime) to this proxy instead of falling back to "gpt-4o-mini" (which the
+    # proxy doesn't serve) or to unauthenticated openrouter/nous.
     model_section = existing.get("model")
     if not isinstance(model_section, dict):
         model_section = {}
     model_section["context_length"] = AGENT_CONTEXT_WINDOW
+    model_section["default"] = "litellm-model"
+    model_section["provider"] = "custom"
+    model_section["base_url"] = LITELLM_API_BASE
+    model_section["api_key"] = "sk-1234"
     existing["model"] = model_section
 
     existing["compression"] = {
@@ -225,20 +290,89 @@ def write_agent_hermes_config(hermes_home: Path) -> None:
         "target_ratio": COMPRESSION_TARGET_RATIO,
         "protect_first_n": COMPRESSION_PROTECT_FIRST_N,
         "protect_last_n": COMPRESSION_PROTECT_LAST_N,
+        "hygiene_hard_message_limit": COMPRESSION_HYGIENE_HARD_MESSAGE_LIMIT,
         "abort_on_summary_failure": False,
     }
 
+    # Route ALL auxiliary tasks (compaction summarizer, title-gen, web-extract,
+    # session search, etc.) through the LiteLLM proxy. Without this, provider
+    # "auto" tries openrouter then nous — both unauthenticated here — so the
+    # compaction SUMMARY call fails and Hermes re-attempts compaction in a tight
+    # loop (the 4 zero-message cascade sessions seen in the CMO's history).
+    # Setting base_url forces provider=custom and uses our model directly
+    # (auxiliary_client._resolve_aux_provider_and_model: base_url present =>
+    # provider forced to "custom"; per-task config wins over "auto").
+    aux_endpoint = {
+        "provider": "custom",
+        "model": "litellm-model",
+        "base_url": LITELLM_API_BASE,
+        "api_key": "sk-1234",
+    }
     aux_section = existing.get("auxiliary")
     if not isinstance(aux_section, dict):
         aux_section = {}
-    aux_comp = aux_section.get("compression")
-    if not isinstance(aux_comp, dict):
-        aux_comp = {}
-    # The summarizer reuses the main model via the LiteLLM proxy (no override),
-    # so it shares the same window; tell the feasibility check about it.
-    aux_comp["context_length"] = AGENT_CONTEXT_WINDOW
-    aux_section["compression"] = aux_comp
+    for _task in (
+        "compression", "title_generation", "web_extract",
+        "session_search", "triage_specifier", "curator", "approval",
+    ):
+        task_cfg = aux_section.get(_task)
+        if not isinstance(task_cfg, dict):
+            task_cfg = {}
+        task_cfg.update(aux_endpoint)
+        aux_section[_task] = task_cfg
+    # The summarizer shares the main window; tell its feasibility check.
+    aux_section["compression"]["context_length"] = AGENT_CONTEXT_WINDOW
     existing["auxiliary"] = aux_section
+
+    # Pin ddgs (DuckDuckGo, no API key) as the web search backend so web_search
+    # is always available and never silently falls through to an unconfigured
+    # paid backend. Requires the `ddgs` package installed in the server's venv.
+    web_section = existing.get("web")
+    if not isinstance(web_section, dict):
+        web_section = {}
+    web_section["search_backend"] = WEB_SEARCH_BACKEND
+    existing["web"] = web_section
+
+    # Apply the disabled-toolsets list (currently empty — delegate_task stays
+    # enabled; see DISABLED_TOOLSETS). Merge-safe with Hermes-seeded agent.* keys.
+    agent_section = existing.get("agent")
+    if not isinstance(agent_section, dict):
+        agent_section = {}
+    agent_section["disabled_toolsets"] = list(DISABLED_TOOLSETS)
+    existing["agent"] = agent_section
+
+    # Cap individual tool-result size so a giant browser snapshot / file read
+    # can't bloat the protected tail and trigger a compaction cascade.
+    existing["tool_output"] = {
+        "max_bytes": TOOL_OUTPUT_MAX_BYTES,
+        "max_lines": TOOL_OUTPUT_MAX_LINES,
+        "max_line_length": TOOL_OUTPUT_MAX_LINE_LENGTH,
+    }
+
+    # Force local browser mode so the browser toolset (+ web_search) is enabled
+    # via the locally-installed Chromium instead of an unconfigured cloud
+    # provider. Merge-safe: other browser keys (timeouts, engine) are preserved.
+    if BROWSER_CLOUD_PROVIDER or cdp_url:
+        browser_section = existing.get("browser")
+        if not isinstance(browser_section, dict):
+            browser_section = {}
+        if BROWSER_CLOUD_PROVIDER:
+            browser_section["cloud_provider"] = BROWSER_CLOUD_PROVIDER
+        # A per-team CDP endpoint makes every agent in the team share ONE
+        # persistent Chrome (same cookies/logins, durable across restarts).
+        # cdp_url takes precedence over cloud_provider/local in Hermes, so the
+        # local setting above just stays as a graceful fallback. Pass "" to
+        # clear a previously-written endpoint.
+        if cdp_url is not None:
+            browser_section["cdp_url"] = cdp_url
+        # Each task_id (the top-level agent AND every delegate_task sub-agent)
+        # gets its OWN tab in the shared Chrome instead of all adopting the
+        # first existing page. This is what lets sub-agents browse concurrently
+        # without hijacking each other's navigation, while still sharing the
+        # team's cookies/logins (one browser, many tabs). Honored by the patched
+        # browser_supervisor._attach_initial_page.
+        browser_section["fresh_tab_per_task"] = True
+        existing["browser"] = browser_section
 
     # Atomic write so a concurrent AIAgent init never reads a half-written file.
     fd, tmp_path = tempfile.mkstemp(dir=str(hermes_home), prefix=".config.", suffix=".tmp")
@@ -386,8 +520,38 @@ def _default_config() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Soul composition — combines common + role-specific parts
 # ---------------------------------------------------------------------------
-def compose_agent_soul(agent_cfg: Dict[str, Any], full_config: Optional[Dict[str, Any]] = None) -> str:
-    """Build the full ephemeral system prompt for an agent."""
+def compose_soul_identity(agent_cfg: Dict[str, Any]) -> str:
+    """Build the SOUL.md identity block for an agent.
+
+    This becomes the agent's PRIMARY identity, written to {HERMES_HOME}/SOUL.md
+    so Hermes loads it as the lead block of the (cached) system prompt — instead
+    of the generic auto-seeded "You are Hermes Agent…" template. The richer
+    operational framing (swarm rules, org chart, peers) stays in the ephemeral
+    prompt via compose_agent_soul(..., include_role=False); the role lives here
+    so it is the first thing the model reads and is cache-stable across turns.
+    """
+    agent_name = agent_cfg.get("name", "Agent")
+    agent_id = agent_cfg.get("agent_id", "unknown")
+    team_id = agent_cfg.get("team_id", "default")
+    role = agent_cfg.get("role_soul", f"You are the {agent_name}.")
+    return (
+        f"{role}\n\n"
+        f'You are "{agent_id}" ({agent_name}), one agent on the "{team_id}" team in an '
+        f"autonomous multi-agent swarm. Operate strictly in the role described above."
+    )
+
+
+def compose_agent_soul(
+    agent_cfg: Dict[str, Any],
+    full_config: Optional[Dict[str, Any]] = None,
+    include_role: bool = True,
+) -> str:
+    """Build the full ephemeral system prompt for an agent.
+
+    When include_role is False, the trailing "YOUR ROLE" block is omitted —
+    used when the role identity is instead written to SOUL.md (so it is not
+    duplicated in both the cached prompt and the ephemeral prompt).
+    """
     agent_name = agent_cfg.get("name", "Agent")
     team_id = agent_cfg.get("team_id", "default")
     peers = agent_cfg.get("allowed_peers", [])
@@ -409,21 +573,26 @@ def compose_agent_soul(agent_cfg: Dict[str, Any], full_config: Optional[Dict[str
         workspace_path=workspace_path,
     )
 
-    role = agent_cfg.get("role_soul", f"You are the {agent_name}.")
-
-    return (
+    body = (
         f"{common}\n"
         f"--- TEAM ORGANIZATION ---\n"
         f"Your team: {team_id}\n\n"
         f"Agent connections and roles:\n"
         f"{org_diagram}\n\n"
         f"All team members:\n"
-        f"{all_members}\n\n"
-        f"{'=' * 60}\n"
-        f"YOUR ROLE\n"
-        f"{'=' * 60}\n"
-        f"{role}\n"
+        f"{all_members}\n"
     )
+
+    if include_role:
+        role = agent_cfg.get("role_soul", f"You are the {agent_name}.")
+        body += (
+            f"\n{'=' * 60}\n"
+            f"YOUR ROLE\n"
+            f"{'=' * 60}\n"
+            f"{role}\n"
+        )
+
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +890,10 @@ def peer_allowed(cfg: Dict[str, Any], caller: str, target: str) -> bool:
         return False
     return target in caller_cfg.get("allowed_peers", [])
 
+
+# Ensure tool subprocesses (rg/grep/find) always have a usable PATH, no matter
+# how the server process was launched. Must run before any agent spawns tools.
+_ensure_full_path()
 
 # Initial load
 AGENTS = load_agents_config()

@@ -10,6 +10,15 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("swarm.monitoring")
 
 
+def _estimate_tokens(content: str) -> int:
+    """Rough token estimate (~4 chars/token) — matches the order of magnitude of
+    the char-based heuristic Hermes' ContextCompressor uses to decide when to
+    compact. Good enough for dashboard usage tracking; not a billing figure."""
+    if not content:
+        return 0
+    return max(1, len(content) // 4)
+
+
 class MonitoringDB:
     """Central SQLite database for all monitoring events and message history."""
 
@@ -33,7 +42,8 @@ class MonitoringDB:
         team_id     TEXT,
         role        TEXT    NOT NULL,
         content     TEXT    NOT NULL,
-        task_id     TEXT
+        task_id     TEXT,
+        tokens      INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_events_agent     ON events(agent_name);
@@ -83,6 +93,15 @@ class MonitoringDB:
                 conn.execute("ALTER TABLE messages ADD COLUMN team_id TEXT")
                 conn.execute("UPDATE messages SET team_id = 'default'")
                 conn.commit()
+            if "tokens" not in cols:
+                # Hermes stores NULL token_count in its own state.db, so the
+                # dashboard had no usage signal. We record a rough char-based
+                # estimate per message (same heuristic Hermes' compressor uses
+                # for its trigger) and backfill existing rows.
+                log.info("[MonitoringDB] Migrating: adding tokens to messages table")
+                conn.execute("ALTER TABLE messages ADD COLUMN tokens INTEGER")
+                conn.execute("UPDATE messages SET tokens = MAX(1, LENGTH(content) / 4)")
+                conn.commit()
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_team ON messages(team_id)")
             conn.commit()
 
@@ -129,9 +148,10 @@ class MonitoringDB:
             with self._conn() as conn:
                 conn.execute(
                     """INSERT INTO messages
-                       (timestamp, agent_name, team_id, role, content, task_id)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (time.time(), agent_name, team_id, role, content, task_id),
+                       (timestamp, agent_name, team_id, role, content, task_id, tokens)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (time.time(), agent_name, team_id, role, content, task_id,
+                     _estimate_tokens(content)),
                 )
                 conn.commit()
         except Exception as e:
@@ -238,6 +258,7 @@ class MonitoringDB:
                             "events": {},
                             "last_active": None,
                             "total_messages": 0,
+                            "total_tokens": 0,
                         }
                     stats[aname]["events"][r["event_type"]] = r["count"]
 
@@ -252,7 +273,10 @@ class MonitoringDB:
                     if r["agent_name"] in stats:
                         stats[r["agent_name"]]["last_active"] = r["last_ts"]
 
-                sql_msg = "SELECT agent_name, COUNT(*) as count FROM messages"
+                sql_msg = (
+                    "SELECT agent_name, COUNT(*) as count, "
+                    "COALESCE(SUM(tokens), 0) as tokens FROM messages"
+                )
                 params_msg = []
                 if team_id:
                     sql_msg += " WHERE team_id = ?"
@@ -262,6 +286,7 @@ class MonitoringDB:
                 for r in rows:
                     if r["agent_name"] in stats:
                         stats[r["agent_name"]]["total_messages"] = r["count"]
+                        stats[r["agent_name"]]["total_tokens"] = r["tokens"]
         except Exception as e:
             log.warning("[MonitorDB] Failed to get stats: %s", e)
         return stats
