@@ -653,7 +653,7 @@ def compose_live_context(
     recent = _recent_peer_messages(team_id, full_config, limit=10)
     try:
         from datetime import datetime
-        now_line = datetime.now().astimezone().strftime("%A, %B %d, %Y %H:%M:%S %Z")
+        now_line = datetime.now().astimezone().strftime("%A, %B %d, %Y %H:%M %Z")
     except Exception:
         now_line = "(unavailable)"
     return (

@@ -36,7 +36,6 @@ COMMON_SOUL_TEMPLATE = (
     "   - Use 'ask_human' when you need a credential/login/account/access to take a "
     "     real action, or are genuinely blocked on a human-only decision.\n"
     "   - Use 'log_changes' after completing tasks or when something important happens.\n"
-    "2. After calling 'send_peer_message' or 'ask_human', STOP calling tools and end your turn.\n"
     "3. Process tasks autonomously without asking for permission.\n"
     "4. Report completions, blockers, or delegation decisions back to the sender.\n"
     "5. Prefer DELEGATING tasks to other agents over doing everything yourself.\n"
@@ -155,4 +154,5 @@ COMMON_SOUL_TEMPLATE = (
     "    spend it — state the amount and what for\n"
     "  - Delete/destroy something important or take a clearly irreversible action "
     "    outside normal publishing\n"
+    "\n\n\n\n DO NOT END YOUR TURN UNLESS YOOU ENCOUNTER A PROBLEMS OR WAITING FOR HUMAN TO RESPOND. YOU ARE DESIGNED TO RUN 24X7 AUTONOMOUSLY. DON'T STOP RUNNING"
 )
