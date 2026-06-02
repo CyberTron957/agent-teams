@@ -13,6 +13,42 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("swarm.config")
 
 
+def ensure_hermes_importable() -> None:
+    """Make the Hermes agent package importable, however it was obtained.
+
+    Resolution order (first that works wins), so the same code runs whether
+    Hermes is pip-installed, on PYTHONPATH, or a source checkout:
+      1. Already importable (pip ``hermes-agent`` or PYTHONPATH) — do nothing.
+      2. ``HERMES_AGENT_PATH`` env var pointing at a source checkout.
+      3. The conventional ``~/.hermes/hermes-agent`` source location.
+    If none resolve, the later ``import run_agent`` raises with a clear hint.
+    Idempotent and cheap (the success path is a single import attempt).
+    """
+    import sys as _sys
+    try:
+        import run_agent  # noqa: F401  (probe: installed or already on path)
+        return
+    except Exception:
+        pass
+    candidates = []
+    env_path = os.environ.get("HERMES_AGENT_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.home() / ".hermes" / "hermes-agent")
+    for cand in candidates:
+        try:
+            if cand and (cand / "run_agent.py").exists():
+                if str(cand) not in _sys.path:
+                    _sys.path.insert(0, str(cand))
+                return
+        except OSError:
+            continue
+    log.warning(
+        "Hermes agent not found. Install it (`pip install hermes-agent`) or set "
+        "HERMES_AGENT_PATH to a hermes-agent checkout."
+    )
+
+
 # Web search backend for all agents. "ddgs" = DuckDuckGo via the `ddgs` Python
 # package — zero API key, near-zero RAM (SearXNG was tried but its multi-engine
 # aggregator OOM-crashed the host). The ddgs Hermes plugin auto-registers when
@@ -72,23 +108,130 @@ def _config_file_key() -> Optional[tuple]:
         return None
 
 # ---------------------------------------------------------------------------
-# Paths (relative to project root)
+# Paths — resolved so the same code works as a source checkout, a pip install,
+# and inside Docker (where data lives on a mounted volume).
 # ---------------------------------------------------------------------------
+import sys as _sys
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = PROJECT_ROOT / "data"
+
+
+def _is_source_checkout() -> bool:
+    """True when running from the repo (vs installed into site-packages)."""
+    return any((PROJECT_ROOT / m).exists() for m in ("pyproject.toml", ".git", "dashboard"))
+
+
+def _resolve_data_root() -> Path:
+    """Writable state dir (configs, queues, workspaces, monitoring db).
+
+    SWARM_DATA_DIR wins (Docker sets it to a mounted volume). Otherwise the repo's
+    ./data in a source checkout, else ~/.hermes-swarm/data for a pip install (never
+    write inside site-packages)."""
+    env = os.environ.get("SWARM_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    if _is_source_checkout():
+        return PROJECT_ROOT / "data"
+    return Path.home() / ".hermes-swarm" / "data"
+
+
+def _resolve_dashboard_dir() -> Path:
+    """Locate the static dashboard across source / in-package / pip data-files."""
+    env = os.environ.get("SWARM_DASHBOARD_DIR")
+    if env:
+        return Path(env).expanduser()
+    for cand in (
+        PROJECT_ROOT / "dashboard",                                  # source / Docker
+        Path(__file__).resolve().parent / "dashboard",              # bundled in-package
+        Path(_sys.prefix) / "share" / "hermes-swarm" / "dashboard",  # pip data-files
+    ):
+        if (cand / "index.html").exists():
+            return cand
+    return PROJECT_ROOT / "dashboard"
+
+
+DATA_ROOT = _resolve_data_root()
 AGENTS_CONFIG_PATH = DATA_ROOT / "agents_config.json"
 MONITORING_DB = DATA_ROOT / "monitoring.db"
-DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
+DASHBOARD_DIR = _resolve_dashboard_dir()
 
 WORKSPACE_ROOT = DATA_ROOT / "teams"
 
 # ---------------------------------------------------------------------------
-# Network / Runtime
+# Network / Runtime  (all env-overridable so the same code runs locally, in a
+# pip install, and in Docker without edits)
 # ---------------------------------------------------------------------------
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 8000
-LITELLM_API_BASE = f"http://{SERVER_HOST}:4000/v1"
-SWEEP_INTERVAL_SECONDS = 10
+# Dashboard bind address. Stays 127.0.0.1 locally for safety; Docker sets
+# SWARM_HOST=0.0.0.0. Bind a public interface only with SWARM_API_KEY set.
+SERVER_HOST = os.environ.get("SWARM_HOST", "127.0.0.1")
+SERVER_PORT = int(os.environ.get("SWARM_PORT", "8000"))
+
+# LLM backend (OpenAI-compatible). Defaults to the local LiteLLM proxy for
+# back-compat; new users point SWARM_LLM_BASE_URL at any OpenAI-compatible
+# endpoint (their own proxy, OpenRouter, etc.) and supply the matching key.
+LITELLM_API_BASE = os.environ.get("SWARM_LLM_BASE_URL", "http://127.0.0.1:4000/v1")
+LLM_API_KEY = os.environ.get("SWARM_LLM_API_KEY", "sk-1234")
+SWEEP_INTERVAL_SECONDS = int(os.environ.get("SWARM_SWEEP_INTERVAL", "10"))
+
+# Model the backend serves by default. Per-agent overrides (cfg["model"]) fall
+# back to this. The fallback list is what the model dropdown shows if the
+# backend can't be queried.
+DEFAULT_MODEL = os.environ.get("SWARM_DEFAULT_MODEL", "litellm-model")
+AVAILABLE_MODELS_FALLBACK = [m.strip() for m in os.environ.get(
+    "SWARM_FALLBACK_MODELS", "litellm-model,kimi").split(",") if m.strip()]
+
+
+def list_proxy_models(base_url: Optional[str] = None, api_key: Optional[str] = None) -> List[str]:
+    """Return the model ids an OpenAI-compatible backend serves (for the dropdown).
+
+    Queries {base_url}/models with the key. Defaults to the legacy proxy; callers
+    pass the resolved default backend so the dropdown reflects what's actually
+    configured. Falls back to AVAILABLE_MODELS_FALLBACK if unreachable so the UI
+    is never empty. DEFAULT_MODEL is always present and first.
+    """
+    base = (base_url or LITELLM_API_BASE).rstrip("/")
+    key = api_key or LLM_API_KEY
+    models: List[str] = []
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{base}/models", headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+    except Exception as e:
+        log.debug("list_proxy_models: query %s failed (%s) — using fallback", base, e)
+    if not models:
+        models = list(AVAILABLE_MODELS_FALLBACK)
+    if DEFAULT_MODEL in models:
+        models.remove(DEFAULT_MODEL)
+    return [DEFAULT_MODEL] + sorted(models)
+
+
+def list_toolsets() -> List[Dict[str, str]]:
+    """Return Hermes' available toolsets as [{name, description}] for the UI.
+
+    Reads them from Hermes' own registry (get_all_toolsets) so the list always
+    matches what the installed Hermes actually supports. Best-effort: returns a
+    minimal fallback if Hermes can't be imported.
+    """
+    try:
+        ensure_hermes_importable()
+        from toolsets import get_all_toolsets
+
+        out = []
+        for name, defn in sorted(get_all_toolsets().items()):
+            desc = ""
+            if isinstance(defn, dict):
+                desc = str(defn.get("description") or "")
+            out.append({"name": name, "description": desc[:160]})
+        return out
+    except Exception as e:
+        log.debug("list_toolsets: Hermes registry unavailable (%s)", e)
+        return [{"name": n, "description": ""} for n in
+                ("web", "terminal", "file", "browser", "memory", "code_execution")]
 
 # ---------------------------------------------------------------------------
 # Context / session compression (Hermes built-in ContextCompressor)
@@ -137,21 +280,7 @@ AUTONOMOUS_HEARTBEAT_SECONDS = int(os.environ.get("SWARM_HEARTBEAT_SECONDS", "18
 
 AUTONOMOUS_HEARTBEAT_PROMPT = (
     "[AUTONOMOUS HEARTBEAT — no human task is queued; you run 24/7]\n"
-    "Your goal THIS cycle is to ship something LIVE — not to write another plan "
-    "or refine an existing draft. Success = what went public this cycle.\n\n"
-    "1. PUBLISH FIRST: what content/assets are already DRAFTED but not yet posted "
-    "or sent? (skim the changelog ../agent_log.md and the specialists' outputs/). "
-    "Unpublished work is your #1 priority — get it LIVE via the browser: have the "
-    "right specialist post it to LinkedIn/Instagram/X/Facebook, send the email, or "
-    "publish the blog post.\n"
-    "2. IF BLOCKED ON ACCESS: if posting needs a login/account you don't have, "
-    "call ask_human for that exact credential and stop — do not just re-draft. "
-    "Once the human provides it, the session persists and you publish from then on.\n"
-    "3. ONLY WHEN THE PIPELINE IS FLOWING (nothing valuable sits unpublished) do "
-    "you create the next NEW asset — then publish that too.\n"
-    "Delegate concrete PUBLISH-and-report tasks to specialists, and log_changes "
-    "recording specifically WHAT WENT LIVE this cycle (URLs if available). Do not "
-    "repeat already-published work."
+    "Current Time: {time}"
 )
 
 # ---------------------------------------------------------------------------
@@ -243,7 +372,15 @@ def _get_team_workspace_path(team_id: str) -> Path:
     return WORKSPACE_ROOT / team_id / "workspace"
 
 
-def write_agent_hermes_config(hermes_home: Path, cdp_url: Optional[str] = None) -> None:
+def write_agent_hermes_config(
+    hermes_home: Path,
+    cdp_url: Optional[str] = None,
+    model: str = DEFAULT_MODEL,
+    compression_threshold: Optional[float] = None,
+    provider: str = "custom",
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> None:
     """Write/merge the Hermes config.yaml under an agent's isolated HERMES_HOME.
 
     Enables and tunes the built-in ContextCompressor so long-running agents
@@ -274,19 +411,30 @@ def write_agent_hermes_config(hermes_home: Path, cdp_url: Optional[str] = None) 
     # "the main model" (auxiliary_client._read_main_model + _resolve_custom_
     # runtime) to this proxy instead of falling back to "gpt-4o-mini" (which the
     # proxy doesn't serve) or to unauthenticated openrouter/nous.
+    # Effective backend: resolved by the caller (per-agent override → swarm
+    # default → legacy proxy). base_url present => OpenAI-compatible "custom"
+    # path; absent => a native provider (e.g. anthropic) Hermes resolves itself.
+    eff_base = base_url if base_url is not None else LITELLM_API_BASE
+    eff_key = api_key if api_key is not None else LLM_API_KEY
+    eff_provider = provider or "custom"
     model_section = existing.get("model")
     if not isinstance(model_section, dict):
         model_section = {}
     model_section["context_length"] = AGENT_CONTEXT_WINDOW
-    model_section["default"] = "litellm-model"
-    model_section["provider"] = "custom"
-    model_section["base_url"] = LITELLM_API_BASE
-    model_section["api_key"] = "sk-1234"
+    model_section["default"] = model
+    model_section["provider"] = eff_provider
+    if eff_base:
+        model_section["base_url"] = eff_base
+    elif "base_url" in model_section:
+        del model_section["base_url"]
+    if eff_key:
+        model_section["api_key"] = eff_key
     existing["model"] = model_section
 
+    _threshold = compression_threshold if compression_threshold is not None else COMPRESSION_THRESHOLD
     existing["compression"] = {
         "enabled": COMPRESSION_ENABLED,
-        "threshold": COMPRESSION_THRESHOLD,
+        "threshold": _threshold,
         "target_ratio": COMPRESSION_TARGET_RATIO,
         "protect_first_n": COMPRESSION_PROTECT_FIRST_N,
         "protect_last_n": COMPRESSION_PROTECT_LAST_N,
@@ -303,11 +451,13 @@ def write_agent_hermes_config(hermes_home: Path, cdp_url: Optional[str] = None) 
     # (auxiliary_client._resolve_aux_provider_and_model: base_url present =>
     # provider forced to "custom"; per-task config wins over "auto").
     aux_endpoint = {
-        "provider": "custom",
-        "model": "litellm-model",
-        "base_url": LITELLM_API_BASE,
-        "api_key": "sk-1234",
+        "provider": eff_provider,
+        "model": model,
     }
+    if eff_base:
+        aux_endpoint["base_url"] = eff_base
+    if eff_key:
+        aux_endpoint["api_key"] = eff_key
     aux_section = existing.get("auxiliary")
     if not isinstance(aux_section, dict):
         aux_section = {}
@@ -771,6 +921,36 @@ def load_agents_config() -> Dict[str, Any]:
         return _deep_copy_config(raw)
 
 
+_CONFIG_BACKUP_KEEP = 10
+
+
+def _backup_config_file() -> None:
+    """Copy the current agents_config.json to a rotating backup before overwrite.
+
+    Best-effort and never raises — a backup failure must not block the real save.
+    Backups live in data/config_backups/ and the oldest beyond _CONFIG_BACKUP_KEEP
+    are pruned. Recovery: copy the newest good backup over agents_config.json.
+    """
+    try:
+        if not AGENTS_CONFIG_PATH.exists():
+            return
+        backup_dir = DATA_ROOT / "config_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        # Monotonic-ish name from the file's mtime (avoids needing a clock here).
+        st = AGENTS_CONFIG_PATH.stat()
+        dest = backup_dir / f"agents_config.{int(st.st_mtime)}.{st.st_size}.json"
+        if not dest.exists():
+            shutil.copy2(AGENTS_CONFIG_PATH, dest)
+        backups = sorted(backup_dir.glob("agents_config.*.json"))
+        for old in backups[:-_CONFIG_BACKUP_KEEP]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except Exception as e:
+        log.debug("config backup skipped: %s", e)
+
+
 def _save_full_config(cfg: Dict[str, Any]) -> None:
     """Atomically persist the full config.
 
@@ -781,6 +961,10 @@ def _save_full_config(cfg: Dict[str, Any]) -> None:
     """
     with _config_lock:
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
+        # Safety net: keep a small rotating set of timestamped backups of the
+        # CURRENT file before overwriting it, so an accidental delete or a bad
+        # write is always recoverable (the file is gitignored — no other history).
+        _backup_config_file()
         fd, tmp_path = tempfile.mkstemp(
             dir=str(DATA_ROOT), prefix=".agents_config.", suffix=".tmp"
         )

@@ -165,6 +165,56 @@ body {
 .inbox-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 140; display: none; }
 .inbox-overlay.open { display: block; }
 
+/* ===== VIEW TABS (History / Live) ===== */
+.view-tabs { display: flex; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg-raised); flex-shrink: 0; }
+.view-tab { padding: 4px 12px; font-size: 11px; font-weight: 600; color: var(--text-muted); background: transparent; border: 1px solid var(--border); border-radius: 5px; cursor: pointer; transition: all 0.15s; }
+.view-tab:hover { border-color: var(--accent); }
+.view-tab.active { color: #fff; background: var(--accent); border-color: var(--accent); }
+.view-tab .live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--busy); margin-right: 4px; vertical-align: middle; }
+.view-tab.active .live-dot { background: #fff; }
+
+/* ===== LIVE EXECUTION TRACE ===== */
+.exec-trace { display: flex; flex-direction: column; gap: 6px; }
+.exec-step { background: var(--bg-card); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font-size: 12px; animation: slideIn 0.2s ease-out; }
+.exec-step .exec-label { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+.exec-step.reasoning { border-left: 3px solid var(--human); }
+.exec-step.reasoning .exec-label { color: var(--human); }
+.exec-step.tool { border-left: 3px solid var(--tool); }
+.exec-step.tool .exec-label { color: var(--tool); }
+.exec-step.answer { border-left: 3px solid var(--idle); }
+.exec-step.answer .exec-label { color: var(--idle); }
+.exec-step pre { background: var(--bg); padding: 6px 8px; border-radius: 4px; overflow-x: auto; font-size: 11px; font-family: var(--font-mono); margin-top: 6px; white-space: pre-wrap; word-break: break-word; max-height: 240px; }
+.exec-obs { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
+.exec-obs strong { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.exec-status { font-size: 11px; color: var(--text-muted); padding: 5px 10px; font-style: italic; display: flex; align-items: center; gap: 7px; }
+.exec-status .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--busy); animation: busy-blink 1.2s infinite; }
+.cfg-row { display: flex; gap: 8px; }
+.cfg-row .control-group { flex: 1; }
+.cfg-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text); }
+.cfg-check input { width: auto; }
+.cfg-telemetry { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px; font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); line-height: 1.6; }
+.cfg-telemetry .tm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 14px; }
+.cfg-telemetry b { color: var(--text); font-weight: 600; }
+.cfg-ctx-bar { height: 6px; background: var(--bg-card); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.cfg-ctx-fill { height: 100%; background: var(--idle); border-radius: 3px; transition: width 0.4s; }
+.cfg-cli { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 6px; font-size: 10.5px; font-family: var(--font-mono); line-height: 1.5; }
+.cfg-cli .cli-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px dashed var(--border); }
+.cfg-cli .cli-row:last-child { border-bottom: none; }
+.cfg-cli .cli-label { color: var(--text-muted); flex: 0 0 38%; font-size: 10px; }
+.cfg-cli code { color: var(--accent); word-break: break-all; flex: 1; }
+.cfg-cli .cli-copy { cursor: pointer; color: var(--text-muted); flex-shrink: 0; }
+.cfg-cli .cli-copy:hover { color: var(--accent); }
+/* agent-card context usage bar */
+.card-ctx { height: 4px; background: var(--bg); border-radius: 2px; overflow: hidden; margin-top: 6px; }
+.card-ctx-fill { height: 100%; border-radius: 2px; transition: width 0.4s; }
+
+/* ===== PROPOSALS (in inbox) ===== */
+.inbox-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin: 4px 2px 8px; }
+.proposal-item { background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--tool); border-radius: 7px; padding: 10px; margin-bottom: 8px; }
+.proposal-item.approved { border-left-color: var(--idle); opacity: 0.7; }
+.proposal-item.rejected { border-left-color: var(--danger); opacity: 0.6; }
+.proposal-changes { font-family: var(--font-mono); font-size: 10.5px; background: var(--bg); border-radius: 4px; padding: 6px 8px; margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+
 @media (max-width: 1100px) { .container { grid-template-columns: 260px 1fr 300px; } }
 @media (max-width: 800px) { .container { grid-template-columns: 1fr; grid-template-rows: auto auto auto auto; } }
 </style>
@@ -188,6 +238,7 @@ body {
                 font-weight:700;padding:1px 6px;border-radius:10px;
             ">0</span>
         </button>
+        <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" title="Default model for all agents">🧠 Model</button>
         <select id="team-select" onchange="changeTeam(this.value)"><option value="">Loading teams...</option></select>
         <button class="btn btn-sm btn-secondary" onclick="showAddTeam()">+ New Team</button>
         <div class="ws-status disconnected" id="ws-status"><span class="ws-dot"></span><span id="ws-text">Disconnected</span></div>
@@ -216,7 +267,12 @@ body {
     </div>
     <div class="panel" style="display:flex;flex-direction:column">
         <div class="panel-header"><span id="msg-header">Messages</span><span style="font-size:10px;color:var(--text-muted)" id="msg-count">0</span></div>
+        <div class="view-tabs">
+            <button class="view-tab active" id="tab-history" onclick="setView('history')">📜 History</button>
+            <button class="view-tab" id="tab-live" onclick="setView('live')"><span class="live-dot"></span>Live Execution</button>
+        </div>
         <div class="panel-body" id="message-list" style="flex:1;overflow-y:auto"><div class="empty-state"><div class="empty-state-icon">💬</div><div>Select an agent</div></div></div>
+        <div class="panel-body exec-trace" id="exec-trace" style="flex:1;overflow-y:auto;display:none"><div class="empty-state"><div class="empty-state-icon">⚡</div><div>Select an agent</div></div></div>
         <div class="controls-section">
             <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Send Task</div>
             <div class="control-group">
@@ -262,6 +318,66 @@ body {
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="hideModal('modal-add-team')">Cancel</button>
             <button class="btn" onclick="doAddTeam()">Create</button>
+        </div>
+    </div>
+</div>
+
+<!-- Agent Config Modal -->
+<div class="modal-bg" id="modal-agent-config">
+    <div class="modal">
+        <div class="modal-header">⚙️ Configure <span id="cfg-agent-title"></span></div>
+        <div class="modal-body">
+            <input type="hidden" id="cfg-agent-id">
+            <div class="control-group"><span class="control-label">Display Name</span><input class="control-input" id="cfg-name"></div>
+            <div class="control-group"><span class="control-label">Model</span><select class="control-select" id="cfg-model"></select></div>
+            <div class="control-group"><label class="cfg-check"><input type="checkbox" id="cfg-autonomous"> Autonomous — self-drives the mission when its queue is idle</label></div>
+            <div class="cfg-row">
+                <div class="control-group"><span class="control-label">Sweep interval (s)</span><input class="control-input" id="cfg-sweep" type="number" min="1" placeholder="default 10"></div>
+                <div class="control-group"><span class="control-label">Reasoning effort</span><select class="control-select" id="cfg-reasoning"><option value="">Default</option><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+            </div>
+            <div class="cfg-row">
+                <div class="control-group"><span class="control-label">Temperature</span><input class="control-input" id="cfg-temp" type="number" step="0.05" min="0" max="2" placeholder="model default"></div>
+                <div class="control-group"><span class="control-label">Max tokens</span><input class="control-input" id="cfg-maxtok" type="number" min="1" placeholder="model default"></div>
+            </div>
+            <div class="cfg-row">
+                <div class="control-group"><span class="control-label">Provider</span><input class="control-input" id="cfg-provider" placeholder="custom / proxy (blank = auto)"></div>
+                <div class="control-group"><span class="control-label">Max iterations</span><input class="control-input" id="cfg-maxiter" type="number" min="1" placeholder="default 90"></div>
+            </div>
+            <div class="cfg-row">
+                <div class="control-group"><span class="control-label">Compression threshold (0–1)</span><input class="control-input" id="cfg-compress" type="number" step="0.05" min="0.1" max="0.95" placeholder="default"></div>
+                <div class="control-group"></div>
+            </div>
+            <div class="control-group"><span class="control-label">Enabled toolsets (comma; blank = defaults)</span><input class="control-input" id="cfg-entools" list="toolset-list" placeholder="e.g. web, terminal, file, browser"></div>
+            <div class="control-group"><span class="control-label">Disabled toolsets (comma)</span><input class="control-input" id="cfg-distools" list="toolset-list" placeholder="e.g. computer_use"></div>
+            <datalist id="toolset-list"></datalist>
+            <div class="control-group"><span class="control-label">Role Soul (identity prompt)</span><textarea class="control-textarea" id="cfg-soul" style="min-height:120px"></textarea></div>
+            <div style="font-size:10px;color:var(--text-muted);line-height:1.5">Model, sampling, tools &amp; soul changes take effect on the agent's next turn (it re-initialises). Autonomous &amp; sweep apply immediately. Leave a numeric field blank to use the default.</div>
+            <div class="control-group" style="margin-top:12px"><span class="control-label">📊 Live telemetry (read-only)</span><div id="cfg-telemetry" class="cfg-telemetry">No turn run yet.</div></div>
+            <div class="control-group"><span class="control-label">⌨️ Hermes CLI — run in terminal to configure this agent without the UI</span><div id="cfg-cli" class="cfg-cli">—</div></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideModal('modal-agent-config')">Cancel</button>
+            <button class="btn" onclick="saveAgentConfig()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Model Setup Modal (first-run + Model Settings) -->
+<div class="modal-bg" id="modal-setup">
+    <div class="modal" style="width:480px">
+        <div class="modal-header">🧠 Connect your model</div>
+        <div class="modal-body">
+            <div id="setup-detected"></div>
+            <div class="control-group"><span class="control-label">Provider</span><select class="control-select" id="setup-provider" onchange="onSetupProviderChange()"></select></div>
+            <div class="control-group" id="setup-baseurl-group"><span class="control-label">API Base URL</span><input class="control-input" id="setup-baseurl" placeholder="https://..."></div>
+            <div class="control-group"><span class="control-label">API Key</span><input class="control-input" id="setup-key" type="password" placeholder="sk-…  (stored locally, never committed)"></div>
+            <div class="control-group"><span class="control-label">Model</span><input class="control-input" id="setup-model" list="setup-model-list" placeholder="model id"><datalist id="setup-model-list"></datalist></div>
+            <div style="font-size:11px;color:var(--text-muted);line-height:1.5">This is the <b>default for all agents</b>. Override it per-agent in each agent's ⚙️ settings. Stored in Hermes config format under your data dir.</div>
+            <div id="setup-error" style="color:var(--danger);font-size:11px;margin-top:8px"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideModal('modal-setup')">Close</button>
+            <button class="btn" onclick="saveSetupModel()">Save &amp; apply</button>
         </div>
     </div>
 </div>
@@ -320,6 +436,13 @@ let ws = null, reconnectTimer = null, reconnectDelay = 1000;
 let agentData = {}, selectedAgent = null, eventCount = 0, msgCount = 0;
 let currentTeam = null;
 let teamsCache = [];
+let modelsCache = [];
+// Live execution trace state (ephemeral; per agent, cleared each turn).
+let viewMode = 'history';        // 'history' | 'live'
+let execTrace = {};              // agent -> [ {type:'reasoning'|'tool', ...} ]
+let execAnswer = {};             // agent -> accumulated streamed answer text
+let execStatus = {};             // agent -> latest transient status line (or null)
+let _execRenderTimer = null;     // debounce for high-frequency token renders
 
 function setWsStatus(status, text) {
     const el = document.getElementById('ws-status');
@@ -373,8 +496,51 @@ function handleWS(msg) {
             break;
         case 'task_dequeued': logEvent('task_dequeued', `${payload.agent_name} processing ${payload.count}`); renderQueues(); break;
         case 'message_sent': logEvent('message_sent', `${payload.from_agent} → ${payload.to_agent}`); animateParticle(payload.from_agent, payload.to_agent); break;
-        case 'conversation_start': logEvent('conversation_start', `${payload.agent_name} processing ${payload.task_count || ''} task(s)`); break;
-        case 'conversation_complete': logEvent('conversation_complete', `${payload.agent_name} done`); if (selectedAgent === payload.agent_name) loadMessages(payload.agent_name); break;
+        case 'conversation_start':
+            logEvent('conversation_start', `${payload.agent_name} processing ${payload.task_count || ''} task(s)`);
+            // New turn → reset that agent's live trace so steps stream fresh.
+            execTrace[payload.agent_name] = [];
+            execAnswer[payload.agent_name] = '';
+            execStatus[payload.agent_name] = 'Starting turn…';
+            if (selectedAgent === payload.agent_name && viewMode === 'live') renderExecTrace();
+            break;
+        case 'conversation_complete':
+            logEvent('conversation_complete', `${payload.agent_name} done`);
+            execStatus[payload.agent_name] = null;  // stop the "working" pulse
+            if (selectedAgent === payload.agent_name) {
+                if (viewMode === 'live') renderExecTrace();
+                loadMessages(payload.agent_name);
+            }
+            break;
+        case 'agent_exec': handleAgentExec(payload); break;
+        case 'agent_config_updated':
+            logEvent('system', `${payload.agent_name} config updated`);
+            refreshData();
+            break;
+        case 'model_default_updated':
+            logEvent('system', `Default model → ${payload.provider}/${payload.model}`);
+            modelsCache = [];
+            loadModels(); refreshData();
+            break;
+        case 'telemetry':
+            if (agentData[payload.agent_name]) agentData[payload.agent_name].telemetry = payload.telemetry;
+            renderAgents();
+            // If the config modal is open for this agent, refresh the live numbers.
+            if (document.getElementById('modal-agent-config').classList.contains('show')
+                && document.getElementById('cfg-agent-id').value === payload.agent_name) {
+                renderTelemetry(payload.telemetry);
+            }
+            break;
+        case 'config_proposal':
+            logEvent('system', `💡 ${payload.agent_name} proposed a config change`);
+            bumpInboxBadge(1);
+            if (document.getElementById('inbox-panel').classList.contains('open')) loadInbox();
+            break;
+        case 'proposal_resolved':
+            logEvent('system', `Proposal for ${payload.agent_name} ${payload.status}`);
+            if (document.getElementById('inbox-panel').classList.contains('open')) loadInbox();
+            refreshData();
+            break;
         case 'message_logged':
             // Only count/append messages for the agent currently being viewed,
             // otherwise the msg counter drifts up on unrelated agents' activity.
@@ -410,12 +576,19 @@ function renderAgents() {
         const peerTags = peers.length
             ? peers.map(p => `<span class="peer-tag">${esc(p)}</span>`).join(' ')
             : '<span class="peer-tag empty">no links</span>';
+        const tm = a.telemetry || {};
+        const ctxPct = tm.context_pct != null ? tm.context_pct : null;
+        const ctxBar = ctxPct != null
+            ? `<div class="card-ctx" title="Context ${ctxPct}% of ${(tm.context_window||0).toLocaleString()} tokens"><div class="card-ctx-fill" style="width:${Math.min(ctxPct,100)}%;background:${ctxPct>85?'var(--danger)':ctxPct>60?'var(--busy)':'var(--idle)'}"></div></div>`
+            : '';
         return `<div class="agent-card ${st} ${sel?'selected':''}" onclick="selectAgent('${jsAttr(n)}')">
             <div class="agent-name"><span class="status-dot ${st}"></span>${esc(a.config?.name || n)}</div>
-            <div class="agent-meta"><span>Queue: <span class="queue-badge">${a.pending_count || 0}</span></span><span style="font-family:var(--font-mono);font-size:10px">${a.config?.session_id?.slice(0,14)}...</span></div>
+            <div class="agent-meta"><span>Queue: <span class="queue-badge">${a.pending_count || 0}</span></span><span class="peer-tag" style="background:rgba(210,168,255,0.12);color:var(--tool)" title="Model">${esc(a.config?.model || 'litellm-model')}</span>${a.config?.autonomous ? '<span class="peer-tag" style="background:rgba(245,158,11,0.15);color:var(--busy)" title="Self-drives when idle">auto</span>' : ''}</div>
+            ${ctxBar}
             <div class="agent-meta" style="margin-top:4px">${peerTags}</div>
             <div class="agent-actions">
                 ${(st === 'busy' || st === 'asking_human') ? `<button class="btn btn-sm" style="background:var(--danger);border-color:var(--danger);color:white" onclick="event.stopPropagation();stopAgent('${jsAttr(n)}')">■ Stop</button>` : ''}
+                <button class="btn btn-sm btn-secondary" title="Configure (model, sampling, soul)" onclick="event.stopPropagation();showAgentConfig('${jsAttr(n)}')">⚙️</button>
                 <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();showLinkEditorFor('${jsAttr(n)}')">🔗</button>
                 <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeAgent('${jsAttr(n)}')">×</button>
             </div>
@@ -427,39 +600,92 @@ function renderNetwork() {
     const svg = document.getElementById('network-svg');
     const names = Object.keys(agentData).sort();
     if (!names.length) { svg.innerHTML = ''; document.getElementById('net-info').textContent = 'No agents'; return; }
-    const w = 580, h = 300, cx = w/2, cy = h/2, r = Math.min(w,h)/2 - 50;
-    const pos = {};
-    names.forEach((n, i) => { const a = (i/names.length)*2*Math.PI - Math.PI/2; pos[n] = {x: cx+r*Math.cos(a), y: cy+r*Math.sin(a)}; });
-    
-    let defs = `<defs><marker id="arrow" markerWidth="6" markerHeight="6" refX="24" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#58a6ff"/></marker></defs>`;
-    let html = defs;
-    
-    // Draw explicit directed links (arrow from source to target)
-    const drawn = new Set();
-    for (let i=0;i<names.length;i++) {
-        for (let j=0;j<names.length;j++) {
-            if (i === j) continue;
-            const a = names[i], b = names[j];
-            const aPeers = agentData[a]?.config?.allowed_peers || [];
-            if (aPeers.includes(b)) {
-                const key = a + '->' + b;
-                if (drawn.has(key)) continue;
-                drawn.add(key);
-                const pa = pos[a], pb = pos[b];
-                html += `<line class="conn" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="#58a6ff" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrow)" data-from="${a}" data-to="${b}"/>`;
-            }
+
+    // --- Undirected adjacency from peer links (links are bidirectional by design) ---
+    const adj = {}; names.forEach(n => adj[n] = new Set());
+    names.forEach(n => (agentData[n]?.config?.allowed_peers || []).forEach(p => {
+        if (adj[n] && adj[p]) { adj[n].add(p); adj[p].add(n); }
+    }));
+    const deg = n => adj[n] ? adj[n].size : 0;
+
+    // --- Layered BFS over each connected component (a forest of org trees) ---
+    // Root each component at its highest-degree node -> that lands the CEO / team
+    // lead at the top, direct reports one level down, ICs below them.
+    const depth = {}, parent = {};
+    const visited = new Set();
+    const order = [...names].sort((a,b) => deg(b)-deg(a) || (a<b?-1:1));
+    for (const start of order) {
+        if (visited.has(start)) continue;
+        const q = [start]; visited.add(start); depth[start]=0; parent[start]=null;
+        while (q.length) {
+            const u = q.shift();
+            [...adj[u]].sort().forEach(v => {
+                if (!visited.has(v)) { visited.add(v); depth[v]=depth[u]+1; parent[v]=u; q.push(v); }
+            });
         }
     }
+    const maxDepth = Math.max(0, ...names.map(n => depth[n]||0));
+
+    // --- Tidy-tree x: leaves get sequential slots, parents center over children ---
+    const children = {}; names.forEach(n => children[n]=[]);
+    names.forEach(n => { if (parent[n]!=null) children[parent[n]].push(n); });
+    names.forEach(n => children[n].sort((a,b)=> a<b?-1:1));
+    const roots = order.filter(n => parent[n]==null);
+    const slot = {}; let nextSlot = 0;
+    (function placeAll() {
+        const place = n => {
+            const kids = children[n];
+            if (!kids.length) { slot[n] = nextSlot++; return; }
+            kids.forEach(place);
+            slot[n] = (slot[kids[0]] + slot[kids[kids.length-1]]) / 2;
+        };
+        roots.forEach(r => { place(r); nextSlot += 0.6; }); // gap between components
+    })();
+    const leaves = Math.max(1, nextSlot);
+
+    // --- Pixel layout: rows by depth, columns by tidy slot ---
+    const colW = 118, rowH = 112, padX = 64, padY = 50, R = 22;
+    const W = Math.round(padX*2 + leaves*colW);
+    const H = Math.round(padY*2 + maxDepth*rowH + 26);
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const pos = {};
+    names.forEach(n => { pos[n] = { x: padX + (slot[n]+0.5)*colW, y: padY + (depth[n]||0)*rowH }; });
+
+    let html = `<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="${R+2}" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#58a6ff"/></marker></defs>`;
+
+    // --- Edges: solid for reporting lines, faint dashed for lateral/cross links ---
+    let treeCount = 0, linkCount = 0;
+    const drawn = new Set();
+    for (const a of names) {
+        for (const b of (agentData[a]?.config?.allowed_peers || [])) {
+            if (a === b || !pos[b]) continue;
+            const key = a + '->' + b;
+            if (drawn.has(key)) continue;
+            drawn.add(key); linkCount++;
+            const isTree = parent[a] === b || parent[b] === a;
+            if (isTree) treeCount++;
+            const pa = pos[a], pb = pos[b];
+            const style = isTree
+                ? `stroke="#58a6ff" stroke-width="1.8" stroke-opacity="0.55" marker-end="url(#arrow)"`
+                : `stroke="#8b949e" stroke-width="1" stroke-opacity="0.18" stroke-dasharray="4 4"`;
+            html += `<line class="conn" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" ${style} data-from="${a}" data-to="${b}"/>`;
+        }
+    }
+
+    // --- Nodes ---
     names.forEach(n => {
         const p = pos[n], st = agentData[n]?.state || 'idle';
         const col = st==='idle'?'#3fb950':st==='busy'?'#f59e0b':'#58a6ff';
-        html += `<g onclick="selectAgent('${jsAttr(n)}')" style="cursor:pointer"><circle cx="${p.x}" cy="${p.y}" r="26" fill="${col}18" stroke="${col}" stroke-width="2"/>
+        const full = agentData[n]?.config?.name || n;
+        const label = full.length > 17 ? full.slice(0,16)+'…' : full;
+        html += `<g onclick="selectAgent('${jsAttr(n)}')" style="cursor:pointer"><title>${esc(full)}</title>
+            <circle cx="${p.x}" cy="${p.y}" r="${R}" fill="${col}18" stroke="${col}" stroke-width="2"/>
             <circle cx="${p.x}" cy="${p.y}" r="5" fill="${col}">${st==='busy'?'<animate attributeName="r" values="5;9;5" dur="1.4s" repeatCount="indefinite"/>':''}</circle>
-            <text x="${p.x}" y="${p.y+40}" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="600">${esc(agentData[n]?.config?.name || n)}</text>
-            <text x="${p.x}" y="${p.y+54}" text-anchor="middle" fill="#8b949e" font-size="10">Q:${agentData[n]?.pending_count||0}</text></g>`;
+            <text x="${p.x}" y="${p.y+R+13}" text-anchor="middle" fill="#c9d1d9" font-size="10.5" font-weight="600">${esc(label)}</text>
+            <text x="${p.x}" y="${p.y+R+26}" text-anchor="middle" fill="#8b949e" font-size="9.5">Q:${agentData[n]?.pending_count||0}</text></g>`;
     });
     svg.innerHTML = html;
-    document.getElementById('net-info').textContent = `${names.length} agents · ${drawn.size} links`;
+    document.getElementById('net-info').textContent = `${names.length} agents · ${treeCount} reporting · ${linkCount-treeCount} lateral`;
 }
 
 function animateParticle(fromAgent, toAgent) {
@@ -539,6 +765,306 @@ function formatMessageContent(msg) {
     return text ? text.replace(/\n/g, '<br>') : '<em style="color:var(--text-muted)">(no text content)</em>';
 }
 
+/* ===== LIVE EXECUTION TRACE ===== */
+function setView(mode) {
+    viewMode = mode;
+    document.getElementById('tab-history').classList.toggle('active', mode === 'history');
+    document.getElementById('tab-live').classList.toggle('active', mode === 'live');
+    document.getElementById('message-list').style.display = mode === 'history' ? '' : 'none';
+    document.getElementById('exec-trace').style.display = mode === 'live' ? '' : 'none';
+    if (mode === 'live') renderExecTrace();
+}
+
+function handleAgentExec(p) {
+    const ag = p.agent_name;
+    if (!ag) return;
+    switch (p.kind) {
+        case 'thinking':
+            execStatus[ag] = p.text ? p.text : 'thinking…';
+            break;
+        case 'reasoning':
+            (execTrace[ag] = execTrace[ag] || []).push({ type: 'reasoning', text: p.text || '' });
+            execStatus[ag] = null;
+            break;
+        case 'tool_start':
+            (execTrace[ag] = execTrace[ag] || []).push({ type: 'tool', id: p.id, name: p.name, args: p.args || '', result: null });
+            execStatus[ag] = `running ${p.name}…`;
+            break;
+        case 'tool_result': {
+            const arr = execTrace[ag] || [];
+            for (let i = arr.length - 1; i >= 0; i--) {
+                if (arr[i].type === 'tool' && arr[i].id === p.id) { arr[i].result = p.result || ''; break; }
+            }
+            execStatus[ag] = null;
+            break;
+        }
+        case 'token':
+            execAnswer[ag] = (execAnswer[ag] || '') + (p.text || '');
+            break;
+    }
+    if (selectedAgent === ag && viewMode === 'live') scheduleExecRender();
+}
+
+// Coalesce rapid token events into one render every ~80ms (smooth, cheap).
+function scheduleExecRender() {
+    if (_execRenderTimer) return;
+    _execRenderTimer = setTimeout(() => { _execRenderTimer = null; renderExecTrace(); }, 80);
+}
+
+function renderExecTrace() {
+    const container = document.getElementById('exec-trace');
+    if (!container) return;
+    if (!selectedAgent) {
+        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚡</div><div>Select an agent</div></div>';
+        return;
+    }
+    const steps = execTrace[selectedAgent] || [];
+    const answer = execAnswer[selectedAgent] || '';
+    const status = execStatus[selectedAgent];
+    if (!steps.length && !answer && !status) {
+        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚡</div><div>Idle — the next turn will stream here live (thinking → tools → answer).</div></div>';
+        return;
+    }
+    let html = '';
+    steps.forEach(s => {
+        if (s.type === 'reasoning') {
+            html += `<div class="exec-step reasoning"><div class="exec-label">🧠 Thinking</div><pre>${esc(s.text)}</pre></div>`;
+        } else if (s.type === 'tool') {
+            const obs = s.result != null
+                ? `<div class="exec-obs"><strong>↳ Output</strong><pre>${esc(s.result)}</pre></div>`
+                : '<div class="exec-obs"><em style="color:var(--text-muted)">running…</em></div>';
+            html += `<div class="exec-step tool"><div class="exec-label">🔧 Tool Call · ${esc(s.name || 'tool')}</div><pre>${esc(s.args)}</pre>${obs}</div>`;
+        }
+    });
+    if (answer) {
+        html += `<div class="exec-step answer"><div class="exec-label">✍️ Response</div><div style="margin-top:6px;white-space:pre-wrap;word-break:break-word">${esc(answer)}</div></div>`;
+    }
+    if (status) {
+        html += `<div class="exec-status"><span class="live-dot"></span>${esc(status)}</div>`;
+    }
+    container.innerHTML = html;
+    container.scrollTop = container.scrollHeight;
+}
+
+/* ===== AGENT CONFIG ===== */
+async function loadModels() {
+    try {
+        const r = await fetch(`${API_URL}/models`);
+        const d = await r.json();
+        modelsCache = d.models || [];
+    } catch (e) { modelsCache = ['litellm-model']; }
+    return modelsCache;
+}
+
+async function showAgentConfig(name) {
+    try {
+        const [cfg, models] = await Promise.all([
+            fetch(`${API_URL}/agent/${encodeURIComponent(name)}/config`).then(r => r.json()),
+            modelsCache.length ? Promise.resolve(modelsCache) : loadModels(),
+        ]);
+        if (cfg.error) { logEvent('error', cfg.error); return; }
+        document.getElementById('cfg-agent-title').textContent = cfg.name || name;
+        document.getElementById('cfg-agent-id').value = name;
+        document.getElementById('cfg-name').value = cfg.name || name;
+        const modelSel = document.getElementById('cfg-model');
+        const opts = [...new Set([...(models || []), cfg.model].filter(Boolean))];
+        const defLabel = cfg.effective_model ? `(Use team default — ${cfg.effective_model})` : '(Use team default)';
+        modelSel.innerHTML = `<option value="">${esc(defLabel)}</option>`
+            + opts.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+        modelSel.value = cfg.model || '';   // empty = inherit the swarm default
+        document.getElementById('cfg-autonomous').checked = !!cfg.autonomous;
+        document.getElementById('cfg-sweep').value = cfg.sweep_interval ?? '';
+        document.getElementById('cfg-reasoning').value = cfg.reasoning_effort || '';
+        document.getElementById('cfg-temp').value = (cfg.temperature ?? '') === '' ? '' : cfg.temperature;
+        document.getElementById('cfg-maxtok').value = cfg.max_tokens ?? '';
+        document.getElementById('cfg-provider').value = cfg.provider || '';
+        document.getElementById('cfg-maxiter').value = cfg.max_iterations ?? '';
+        document.getElementById('cfg-compress').value = cfg.compression_threshold ?? '';
+        document.getElementById('cfg-entools').value = (cfg.enabled_toolsets || []).join(', ');
+        document.getElementById('cfg-distools').value = (cfg.disabled_toolsets || []).join(', ');
+        document.getElementById('cfg-soul').value = cfg.role_soul || '';
+        renderTelemetry(cfg.telemetry || (agentData[name] && agentData[name].telemetry) || {});
+        loadToolsets();
+        loadAgentCli(name);
+        document.getElementById('modal-agent-config').classList.add('show');
+    } catch (e) { logEvent('error', e.message); }
+}
+
+function renderTelemetry(t) {
+    const el = document.getElementById('cfg-telemetry');
+    if (!el) return;
+    if (!t || !Object.keys(t).length) { el.textContent = 'No turn run yet — telemetry appears after the agent processes a task.'; return; }
+    const ctxPct = t.context_pct != null ? t.context_pct : (t.context_window ? Math.round(100 * (t.context_tokens || 0) / t.context_window) : 0);
+    const barColor = ctxPct > 85 ? 'var(--danger)' : ctxPct > 60 ? 'var(--busy)' : 'var(--idle)';
+    const fmt = n => (n == null ? '—' : Number(n).toLocaleString());
+    el.innerHTML = `
+        <div class="tm-grid">
+            <span>Context: <b>${fmt(t.context_tokens)}</b> / ${fmt(t.context_window)}</span>
+            <span>Compacts at: <b>${fmt(t.compress_threshold_tokens)}</b></span>
+            <span>Session tokens: <b>${fmt(t.session_total_tokens)}</b></span>
+            <span>Cost: <b>$${(t.session_cost_usd || 0).toFixed(4)}</b></span>
+            <span>In/Out: <b>${fmt(t.session_input_tokens)}</b> / <b>${fmt(t.session_output_tokens)}</b></span>
+            <span>Max iters: <b>${fmt(t.max_iterations)}</b></span>
+        </div>
+        <div style="margin-top:6px">Context used: <b style="color:${barColor}">${ctxPct}%</b><div class="cfg-ctx-bar"><div class="cfg-ctx-fill" style="width:${Math.min(ctxPct,100)}%;background:${barColor}"></div></div></div>`;
+}
+
+async function loadToolsets() {
+    try {
+        const r = await fetch(`${API_URL}/toolsets`);
+        const d = await r.json();
+        const dl = document.getElementById('toolset-list');
+        if (dl) dl.innerHTML = (d.toolsets || []).map(ts => `<option value="${esc(ts.name)}">${esc(ts.description || '')}</option>`).join('');
+    } catch (e) { /* non-fatal */ }
+}
+
+async function loadAgentCli(name) {
+    const el = document.getElementById('cfg-cli');
+    if (el) el.textContent = 'Loading…';
+    try {
+        const r = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/cli`);
+        const d = await r.json();
+        if (!el) return;
+        if (d.error) { el.textContent = d.error; return; }
+        el.innerHTML = (d.commands || []).map(c => `
+            <div class="cli-row">
+                <span class="cli-label">${esc(c.label)}</span>
+                <code>${esc(c.cmd)}</code>
+                <span class="cli-copy" title="Copy" onclick="copyText(this, ${JSON.stringify(c.cmd).replace(/"/g,'&quot;')})">⧉</span>
+            </div>`).join('');
+    } catch (e) { if (el) el.textContent = 'Could not load CLI commands.'; }
+}
+
+function copyText(elm, text) {
+    try { navigator.clipboard.writeText(text); const o = elm.textContent; elm.textContent = '✓'; setTimeout(() => elm.textContent = o, 1000); }
+    catch (e) { logEvent('error', 'Copy failed'); }
+}
+
+async function saveAgentConfig() {
+    const name = document.getElementById('cfg-agent-id').value;
+    if (!name) return;
+    const body = {
+        name: document.getElementById('cfg-name').value.trim(),
+        model: document.getElementById('cfg-model').value,
+        autonomous: document.getElementById('cfg-autonomous').checked,
+        sweep_interval: document.getElementById('cfg-sweep').value.trim(),
+        reasoning_effort: document.getElementById('cfg-reasoning').value,
+        temperature: document.getElementById('cfg-temp').value.trim(),
+        max_tokens: document.getElementById('cfg-maxtok').value.trim(),
+        provider: document.getElementById('cfg-provider').value.trim(),
+        max_iterations: document.getElementById('cfg-maxiter').value.trim(),
+        compression_threshold: document.getElementById('cfg-compress').value.trim(),
+        enabled_toolsets: document.getElementById('cfg-entools').value.trim(),
+        disabled_toolsets: document.getElementById('cfg-distools').value.trim(),
+        role_soul: document.getElementById('cfg-soul').value,
+    };
+    try {
+        const res = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/config`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); return; }
+        logEvent('system', `${name} config saved (model: ${body.model})`);
+        hideModal('modal-agent-config');
+        refreshData();
+    } catch (e) { logEvent('error', e.message); }
+}
+
+/* ===== MODEL SETUP / SETTINGS ===== */
+let setupProviders = [];
+
+async function checkSetup() {
+    try {
+        const d = await fetch(`${API_URL}/setup/status`).then(r => r.json());
+        if (!d.configured) showModelSettings(true);
+    } catch (e) { /* non-fatal */ }
+}
+
+async function showModelSettings(firstRun) {
+    if (!setupProviders.length) {
+        try { setupProviders = (await fetch(`${API_URL}/providers`).then(r => r.json())).providers || []; } catch (e) {}
+    }
+    let status = {};
+    try { status = await fetch(`${API_URL}/setup/status`).then(r => r.json()); } catch (e) {}
+    const cur = status.default || {};
+    const detected = status.detected_hermes;
+
+    const provSel = document.getElementById('setup-provider');
+    provSel.innerHTML = setupProviders.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+
+    const det = document.getElementById('setup-detected');
+    if (detected && detected.model) {
+        det.innerHTML = `<div style="background:rgba(63,185,80,0.1);border:1px solid var(--idle);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
+            Found a model already configured in Hermes on this machine:
+            <b>${esc(detected.provider || '')}/${esc(detected.model)}</b>
+            <button class="btn btn-sm" style="margin-left:8px" onclick="adoptDetected()">Use this</button></div>`;
+    } else {
+        det.innerHTML = firstRun
+            ? '<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">No model configured yet — connect one to start the swarm.</div>'
+            : '';
+    }
+
+    provSel.value = (cur.provider && setupProviders.some(p => p.id === cur.provider)) ? cur.provider : (setupProviders[0]?.id || 'openrouter');
+    onSetupProviderChange();
+    if (cur.model) document.getElementById('setup-model').value = cur.model;
+    if (cur.base_url) document.getElementById('setup-baseurl').value = cur.base_url;
+    document.getElementById('setup-key').value = '';
+    document.getElementById('setup-error').textContent = cur.has_key ? '' : '';
+    document.getElementById('modal-setup').classList.add('show');
+}
+
+function onSetupProviderChange() {
+    const pid = document.getElementById('setup-provider').value;
+    const p = setupProviders.find(x => x.id === pid) || {};
+    const group = document.getElementById('setup-baseurl-group');
+    const baseInput = document.getElementById('setup-baseurl');
+    if (p.openai_compatible === false) {       // native provider (e.g. Anthropic)
+        group.style.display = 'none';
+        baseInput.value = '';
+    } else {
+        group.style.display = '';
+        baseInput.value = p.base_url || '';
+        baseInput.readOnly = !p.needs_base_url;  // editable only for "custom"
+    }
+    document.getElementById('setup-model-list').innerHTML = (p.models || []).map(m => `<option value="${esc(m)}">`).join('');
+    const modelInput = document.getElementById('setup-model');
+    if ((p.models || []).length && !modelInput.value) modelInput.value = p.models[0];
+    // OAuth providers can't be set up by pasting a key — point to the terminal.
+    const err = document.getElementById('setup-error');
+    err.style.color = 'var(--danger)'; err.textContent = '';
+    if (p.auth_type && p.auth_type !== 'api_key') {
+        err.style.color = 'var(--busy)';
+        err.textContent = 'This provider uses OAuth login — configure it in a terminal (HERMES_HOME=… hermes setup model; see an agent’s ⚙️ → Hermes CLI), then adopt it here.';
+    }
+}
+
+async function adoptDetected() { await postSetup({ adopt_detected: true }); }
+
+async function saveSetupModel() {
+    const provider = document.getElementById('setup-provider').value;
+    const model = document.getElementById('setup-model').value.trim();
+    const base_url = document.getElementById('setup-baseurl').value.trim();
+    const api_key = document.getElementById('setup-key').value.trim();
+    if (!model) { document.getElementById('setup-error').textContent = 'Enter a model id.'; return; }
+    await postSetup({ provider, model, base_url, api_key });
+}
+
+async function postSetup(body) {
+    document.getElementById('setup-error').textContent = '';
+    try {
+        const d = await fetch(`${API_URL}/setup/model`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        }).then(r => r.json());
+        if (d.error) { document.getElementById('setup-error').textContent = d.error; return; }
+        logEvent('system', `Default model set: ${d.provider}/${d.model}`);
+        hideModal('modal-setup');
+        modelsCache = [];          // force re-fetch with the new backend
+        loadModels(); refreshData();
+    } catch (e) { document.getElementById('setup-error').textContent = e.message; }
+}
+
 /* ===== MESSAGE PANEL ===== */
 async function loadMessages(agentName) {
     try {
@@ -604,6 +1130,7 @@ function selectAgent(name) {
     selectedAgent = name;
     renderAgents();
     if (name) loadMessages(name);
+    if (viewMode === 'live') renderExecTrace();
 }
 
 function updateTarget() {
@@ -811,6 +1338,7 @@ async function toggleLink(from, to) {
 
 /* ===== INBOX ===== */
 let inboxQuestions = [];
+let inboxProposals = [];
 
 function toggleInbox() {
     document.getElementById('inbox-panel').classList.toggle('open');
@@ -820,23 +1348,53 @@ function toggleInbox() {
     }
 }
 
+function bumpInboxBadge(delta) {
+    const cur = parseInt(document.getElementById('inbox-badge')?.textContent || '0');
+    updateInboxBadge(Math.max(0, cur + delta));
+}
+
 async function loadInbox() {
     try {
-        const res = await fetch(`${API_URL}/inbox`);
-        const data = await res.json();
-        inboxQuestions = data.questions || [];
+        const [inbox, props] = await Promise.all([
+            fetch(`${API_URL}/inbox`).then(r => r.json()),
+            fetch(`${API_URL}/proposals`).then(r => r.json()).catch(() => ({ proposals: [], pending_count: 0 })),
+        ]);
+        inboxQuestions = inbox.questions || [];
+        inboxProposals = props.proposals || [];
         renderInbox();
-        updateInboxBadge(data.pending_count || 0);
+        updateInboxBadge((inbox.pending_count || 0) + (props.pending_count || 0));
     } catch (e) { console.error('[Inbox] load failed:', e); }
 }
 
 function renderInbox() {
     const body = document.getElementById('inbox-body');
-    if (!inboxQuestions.length) {
-        body.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#9993;</div><div>No questions yet</div></div>';
+    let html = '';
+    if (inboxProposals.length) {
+        html += '<div class="inbox-section-title">💡 Config Proposals</div>';
+        html += inboxProposals.map(p => {
+            const ts = new Date(p.timestamp * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+            const agent = agentData[p.agent_name]?.config?.name || p.agent_name;
+            const actions = p.status === 'pending'
+                ? `<div style="margin-top:8px;display:flex;gap:6px"><button class="btn btn-sm" onclick="approveProposal('${jsAttr(p.id)}')">✓ Approve</button><button class="btn btn-sm btn-danger" onclick="rejectProposal('${jsAttr(p.id)}')">✕ Reject</button></div>`
+                : '';
+            return `<div class="proposal-item ${esc(p.status)}">
+                <div class="inbox-item-header"><span class="inbox-item-agent">${esc(agent)}</span><span class="inbox-item-status">${esc(p.status)} &middot; ${ts}</span></div>
+                <div class="proposal-changes">${esc(JSON.stringify(p.changes, null, 1))}</div>
+                ${p.reason ? `<div style="font-size:11px;color:var(--text-muted)">${esc(p.reason)}</div>` : ''}
+                ${actions}
+            </div>`;
+        }).join('');
+        html += '<div class="inbox-section-title" style="margin-top:14px">&#9993; Questions</div>';
+    }
+    if (!inboxQuestions.length && !inboxProposals.length) {
+        body.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#9993;</div><div>No questions or proposals yet</div></div>';
         return;
     }
-    body.innerHTML = inboxQuestions.map(q => {
+    if (!inboxQuestions.length) {
+        body.innerHTML = html + '<div style="font-size:11px;color:var(--text-muted);padding:4px 2px">No questions.</div>';
+        return;
+    }
+    body.innerHTML = html + inboxQuestions.map(q => {
         const ts = new Date(q.timestamp * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
         const statusLabel = q.status === 'pending' ? 'Waiting' : q.status === 'answered' ? 'Answered' : 'Timed Out';
         const statusClass = q.status;
@@ -904,10 +1462,33 @@ async function submitResponse() {
     } catch (e) { logEvent('error', e.message); }
 }
 
+async function approveProposal(pid) {
+    try {
+        const res = await fetch(`${API_URL}/proposals/${encodeURIComponent(pid)}/approve`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); return; }
+        logEvent('system', `Proposal approved for ${data.agent_name}`);
+        loadInbox();
+        refreshData();
+    } catch (e) { logEvent('error', e.message); }
+}
+
+async function rejectProposal(pid) {
+    try {
+        const res = await fetch(`${API_URL}/proposals/${encodeURIComponent(pid)}/reject`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); return; }
+        logEvent('system', 'Proposal rejected');
+        loadInbox();
+    } catch (e) { logEvent('error', e.message); }
+}
+
 /* ===== INIT ===== */
 document.addEventListener('DOMContentLoaded', () => {
     connectWS();
     loadTeams();
+    loadModels();
+    checkSetup();
     // Dismiss modals by clicking the backdrop or pressing Escape.
     document.querySelectorAll('.modal-bg').forEach(bg => {
         bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('show'); });
@@ -923,11 +1504,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Poll inbox every 5s for pending human questions
     setInterval(() => {
         const panel = document.getElementById('inbox-panel');
-        // Always refresh badge count; if panel is open, refresh full list
-        fetch(`${API_URL}/inbox`).then(r => r.json()).then(d => {
-            updateInboxBadge(d.pending_count || 0);
-            if (panel && panel.classList.contains('open')) {
+        const open = panel && panel.classList.contains('open');
+        Promise.all([
+            fetch(`${API_URL}/inbox`).then(r => r.json()),
+            fetch(`${API_URL}/proposals`).then(r => r.json()).catch(() => ({ proposals: [], pending_count: 0 })),
+        ]).then(([d, p]) => {
+            updateInboxBadge((d.pending_count || 0) + (p.pending_count || 0));
+            if (open) {
                 inboxQuestions = d.questions || [];
+                inboxProposals = p.proposals || [];
                 renderInbox();
             }
         }).catch(() => {});

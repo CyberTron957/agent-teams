@@ -1,0 +1,11 @@
+# Never bake local state / secrets / caches into the image.
+data/
+.git/
+.env
+**/__pycache__/
+*.pyc
+.DS_Store
+.venv/
+venv/
+docs/
+tests/

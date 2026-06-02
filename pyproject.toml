@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-swarm"
+version = "0.4.0"
+description = "P2P multi-agent swarm server with a real-time dashboard, powered by the Hermes agent."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Tron957" }]
+keywords = ["agents", "multi-agent", "hermes", "swarm", "llm", "automation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Framework :: FastAPI",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "pyyaml",
+    "pydantic",
+    "aiosqlite",
+    "ddgs",
+    # The agent runtime each swarm member runs. [all] pulls the browser/web/file
+    # toolsets the swarm relies on. Pinned to the floor that has the interrupt()
+    # API + the progress callbacks the live-execution view uses.
+    "hermes-agent[all]>=0.15.2",
+]
+
+[project.scripts]
+hermes-swarm = "swarm_server.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/NousResearch/hermes-agent"
+
+[tool.setuptools]
+packages = ["swarm_server"]
+
+# Ship the static dashboard. Resolved at runtime by config._resolve_dashboard_dir
+# (it probes this share/ location for pip installs).
+[tool.setuptools.data-files]
+"share/hermes-swarm/dashboard" = ["dashboard/index.html"]

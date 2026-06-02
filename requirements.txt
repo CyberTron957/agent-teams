@@ -1,6 +1,13 @@
+# Swarm server runtime deps (source/dev install).
+# For the full packaged install use `pip install .` (see pyproject.toml).
 fastapi
 uvicorn[standard]
 httpx
 pyyaml
 pydantic
 aiosqlite
+ddgs
+
+# The agent runtime each swarm member runs. Installed from PyPI; a source
+# checkout on PYTHONPATH (or HERMES_AGENT_PATH) takes precedence if present.
+hermes-agent[all]>=0.15.2

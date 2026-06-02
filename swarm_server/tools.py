@@ -79,6 +79,60 @@ def mark_timed_out(qid: str) -> None:
         if q and q["status"] == "pending":
             q["status"] = "timed_out"
 
+
+# ---------------------------------------------------------------------------
+# Self-config proposals — an agent can PROPOSE a change to its own config;
+# the human approves/rejects it in the dashboard (read-only self-awareness).
+# Mirrors the human-question inbox above.
+# ---------------------------------------------------------------------------
+# Editable keys an agent may propose (kept in sync with server's editable set).
+SELF_CONFIG_ALLOWED_KEYS = (
+    "model", "provider", "temperature", "max_tokens", "reasoning_effort",
+    "sweep_interval", "max_iterations", "enabled_toolsets", "disabled_toolsets",
+    "compression_threshold", "autonomous",
+)
+
+_pending_config_proposals: Dict[str, Dict[str, Any]] = {}
+_proposals_lock = threading.Lock()
+
+
+def add_config_proposal(agent_name: str, changes: Dict[str, Any], reason: str) -> str:
+    pid = str(uuid.uuid4())
+    with _proposals_lock:
+        _pending_config_proposals[pid] = {
+            "id": pid,
+            "agent_name": agent_name,
+            "changes": changes,
+            "reason": reason,
+            "timestamp": time.time(),
+            "status": "pending",
+        }
+        # Bound the registry: drop oldest RESOLVED proposals past the cap.
+        if len(_pending_config_proposals) > 200:
+            resolved = sorted(
+                (p for p in _pending_config_proposals.values() if p["status"] != "pending"),
+                key=lambda p: p["timestamp"],
+            )
+            for p in resolved[: len(_pending_config_proposals) - 200]:
+                _pending_config_proposals.pop(p["id"], None)
+    return pid
+
+
+def get_config_proposals() -> List[Dict[str, Any]]:
+    with _proposals_lock:
+        return [dict(p) for p in _pending_config_proposals.values()]
+
+
+def resolve_config_proposal(pid: str, status: str):
+    """Mark a proposal approved/rejected; returns the (copied) proposal or None."""
+    with _proposals_lock:
+        p = _pending_config_proposals.get(pid)
+        if not p:
+            return None
+        p["status"] = status
+        p["resolved_at"] = time.time()
+        return dict(p)
+
 # ---------------------------------------------------------------------------
 # Tool Schemas
 # ---------------------------------------------------------------------------
@@ -134,6 +188,52 @@ _LOG_CHANGES_TOOL_SCHEMA = {
                 },
             },
             "required": ["entry"],
+        },
+    },
+}
+
+
+_GET_SELF_CONFIG_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_self_config",
+        "description": (
+            "Read YOUR OWN current configuration and live runtime telemetry: model, "
+            "provider, allowed/disabled toolsets, sweep interval, max iterations, "
+            "reasoning effort, context window size + current context usage, tokens "
+            "spent this session, and the compression threshold. Use it to understand "
+            "how you are set up before deciding whether a change is worth proposing."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+_REQUEST_CONFIG_CHANGE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "request_config_change",
+        "description": (
+            "PROPOSE a change to your own configuration. You CANNOT change your own "
+            "settings directly — this sends the proposal to the human operator, who "
+            "approves or rejects it in the dashboard. The change takes effect ONLY "
+            "after approval. Use it when you believe a different model, tool set, or "
+            "setting would help you do your job better; always explain why."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "changes": {
+                    "type": "object",
+                    "description": (
+                        "Map of setting -> new value. Allowed keys: model, provider, "
+                        "temperature, max_tokens, reasoning_effort, sweep_interval, "
+                        "max_iterations, enabled_toolsets, disabled_toolsets, "
+                        "compression_threshold, autonomous."
+                    ),
+                },
+                "reason": {"type": "string", "description": "Why this change is warranted."},
+            },
+            "required": ["changes", "reason"],
         },
     },
 }
@@ -362,14 +462,80 @@ def _log_changes_handler(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "message": "Log entry recorded."})
 
 
+def _caller_from_kwargs(kwargs: dict) -> str:
+    task_id_arg = kwargs.get("task_id", "")
+    if task_id_arg and task_id_arg.startswith("agent_name:"):
+        return task_id_arg.split(":", 1)[1]
+    return "unknown"
+
+
+def _get_self_config_handler(args: dict, **kwargs) -> str:
+    caller = _caller_from_kwargs(kwargs)
+    from swarm_server.config import load_agents_config, DEFAULT_MODEL
+
+    cfg = load_agents_config()
+    a = cfg["agents"].get(caller)
+    if a is None:
+        return json.dumps({"success": False, "error": f"Agent '{caller}' not found."})
+    editable = {k: a.get(k) for k in SELF_CONFIG_ALLOWED_KEYS}
+    editable["model"] = editable.get("model") or DEFAULT_MODEL
+    daemon = _daemon_registry.get(caller)
+    telemetry = dict(getattr(daemon, "_telemetry", {}) or {}) if daemon else {}
+    return json.dumps({
+        "success": True,
+        "agent_name": caller,
+        "team_id": a.get("team_id"),
+        "config": editable,
+        "allowed_peers": a.get("allowed_peers", []),
+        "telemetry": telemetry,
+    }, default=str)
+
+
+def _request_config_change_handler(args: dict, **kwargs) -> str:
+    caller = _caller_from_kwargs(kwargs)
+    changes = args.get("changes") or {}
+    reason = (args.get("reason") or "").strip()
+    if not isinstance(changes, dict) or not changes:
+        return json.dumps({"success": False, "error": "'changes' must be a non-empty object."})
+    filtered = {k: v for k, v in changes.items() if k in SELF_CONFIG_ALLOWED_KEYS}
+    if not filtered:
+        return json.dumps({
+            "success": False,
+            "error": f"No allowed keys in 'changes'. Allowed: {list(SELF_CONFIG_ALLOWED_KEYS)}",
+        })
+
+    pid = add_config_proposal(caller, filtered, reason)
+    log.info("[%s] [request_config_change] proposal=%s changes=%s", caller, pid[:8], filtered)
+    monitor_db.log_event(
+        caller, "config_proposal",
+        data={"proposal_id": pid, "changes": filtered, "reason": reason[:300]},
+    )
+    _broadcast("config_proposal", {
+        "agent_name": caller,
+        "proposal_id": pid,
+        "changes": filtered,
+        "reason": reason[:200],
+        "timestamp": time.time(),
+    })
+    return json.dumps({
+        "success": True,
+        "proposal_id": pid,
+        "status": "pending",
+        "message": (
+            "Proposal sent to the human operator for approval. It will take effect "
+            "ONLY if they approve it in the dashboard. Do not assume it is applied."
+        ),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 def _register_custom_tools():
     try:
-        import sys
+        from swarm_server.config import ensure_hermes_importable
 
-        sys.path.insert(0, "/Users/pradhyun/.hermes/hermes-agent")
+        ensure_hermes_importable()
         from tools.registry import registry
 
         if "send_peer_message" not in (registry.get_tool_to_toolset_map() or {}):
@@ -399,5 +565,23 @@ def _register_custom_tools():
                 description="Log important events to the shared team activity log.",
             )
             log.info("[log_changes] Registered")
+        if "get_self_config" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="get_self_config",
+                toolset="custom",
+                schema=_GET_SELF_CONFIG_TOOL_SCHEMA["function"],
+                handler=_get_self_config_handler,
+                description="Read your own configuration and runtime telemetry.",
+            )
+            log.info("[get_self_config] Registered")
+        if "request_config_change" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="request_config_change",
+                toolset="custom",
+                schema=_REQUEST_CONFIG_CHANGE_TOOL_SCHEMA["function"],
+                handler=_request_config_change_handler,
+                description="Propose a change to your own config (human approves).",
+            )
+            log.info("[request_config_change] Registered")
     except Exception as exc:
         log.warning("[Custom Tools] Could not register in Hermes registry: %s", exc)

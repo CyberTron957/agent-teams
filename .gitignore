@@ -6,12 +6,16 @@ __pycache__/
 dist/
 build/
 
+# Secrets / local env
+.env
+
 # Runtime data (auto-generated)
 data/*/.hermes/
 data/*/*.db
 data/*/*.db-shm
 data/*/*.db-wal
 data/monitoring.db
+data/config_backups/
 
 # IDE
 .vscode/

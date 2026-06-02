@@ -16,7 +16,10 @@ from swarm_server.config import (
     AGENTS,
     CORS_ALLOWED_ORIGINS,
     DASHBOARD_DIR,
+    DEFAULT_MODEL,
     LITELLM_API_BASE,
+    list_proxy_models,
+    list_toolsets,
     MONITORING_DB,
     MONITORING_MAX_EVENTS,
     MONITORING_MAX_MESSAGES,
@@ -143,6 +146,7 @@ async def websocket_endpoint(ws: WebSocket):
                         "pending_count": d.queue.get_pending_count(),
                         "config": d.cfg,
                         "next_sweep_at": d.next_sweep_at,
+                        "telemetry": dict(getattr(d, "_telemetry", {}) or {}),
                     }
                     for name, d in daemons.items()
                 },
@@ -321,7 +325,11 @@ def _update_daemon_cfg(agent_name: str, new_cfg: Dict[str, Any]):
     if daemon is not None:
         with daemon._lock:
             daemon.cfg = new_cfg
+            # Force a re-init so model/sampling/soul changes take effect next turn.
             daemon._ai_agent = None
+            # Refresh runtime knobs read outside _ensure_agent (heartbeat + sweep).
+            daemon._autonomous = bool(new_cfg.get("autonomous", False))
+            daemon._sweep_interval = daemon._resolve_sweep_interval(new_cfg)
 
 
 @app.get("/agent/{agent_name}/peers")
@@ -407,6 +415,296 @@ async def update_agent_soul(agent_name: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Per-Agent Configuration (model + sampling + runtime knobs)
+# ---------------------------------------------------------------------------
+# Fields the UI may edit via the config endpoint. Everything else in the stored
+# cfg (team_id, session_id, allowed_peers, …) is left untouched.
+_EDITABLE_AGENT_FIELDS = {
+    "name", "model", "provider", "autonomous", "sweep_interval",
+    "temperature", "max_tokens", "reasoning_effort", "max_iterations",
+    "enabled_toolsets", "disabled_toolsets", "compression_threshold", "role_soul",
+}
+# Numeric fields where an empty value means "clear → use the default".
+_NUMERIC_CLEARABLE = (
+    "sweep_interval", "temperature", "max_tokens",
+    "max_iterations", "compression_threshold",
+)
+
+
+def _apply_config_fields(base: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge UI/agent-supplied editable fields into a copy of the stored cfg.
+
+    Empty values clear optional overrides (revert to default). Toolset fields
+    accept a comma-string or a list. Shared by the PATCH endpoint and the
+    self-config proposal-approval path so both normalize identically.
+    """
+    updated = dict(base)
+    for key in _EDITABLE_AGENT_FIELDS:
+        if key not in body:
+            continue
+        val = body[key]
+        if key in _NUMERIC_CLEARABLE and val in ("", None):
+            updated.pop(key, None)
+            continue
+        if key in ("reasoning_effort", "provider", "model") and val in ("", None, "default"):
+            # Empty model/provider clears the per-agent override → inherit the
+            # swarm default. (provider "default" sentinel handled the same way.)
+            updated.pop(key, None)
+            continue
+        if key in ("enabled_toolsets", "disabled_toolsets"):
+            if isinstance(val, str):
+                val = [s.strip() for s in val.split(",") if s.strip()]
+            if not val:
+                updated.pop(key, None)
+                continue
+        if key == "autonomous":
+            val = bool(val)
+        updated[key] = val
+    return updated
+
+
+@app.get("/models")
+async def get_models():
+    """Model ids the CONFIGURED default backend serves (for the config dropdown)."""
+    from swarm_server.model_config import resolve_model, get_default_model, _preset
+
+    eff = resolve_model({})  # the default backend (no per-agent override)
+    served = list_proxy_models(eff.get("base_url") or None, eff.get("api_key") or None)
+    # Also offer the chosen provider's known models (helps native providers like
+    # Anthropic where there's no /models listing).
+    preset = _preset(get_default_model().get("provider") or "")
+    extra = [m for m in preset.get("models", []) if m not in served]
+    return JSONResponse({"models": served + extra, "default": eff.get("model") or DEFAULT_MODEL})
+
+
+@app.get("/providers")
+async def get_providers():
+    """Provider catalogue for the setup screen (Hermes registry + OpenRouter/Custom)."""
+    from swarm_server.model_config import build_provider_presets
+
+    return JSONResponse({"providers": build_provider_presets()})
+
+
+@app.get("/setup/status")
+async def setup_status():
+    """Whether a model is configured (drives the first-run setup screen)."""
+    from swarm_server.model_config import (
+        is_model_configured, get_default_model, detect_global_hermes_model,
+    )
+
+    default = get_default_model()
+    detected = detect_global_hermes_model()
+    return JSONResponse({
+        "configured": is_model_configured(),
+        "default": {
+            "provider": default.get("provider"), "model": default.get("model"),
+            "base_url": default.get("base_url"), "has_key": bool(default.get("api_key")),
+        },
+        "detected_hermes": {
+            "provider": detected.get("provider"), "model": detected.get("model"),
+        } if detected.get("model") else None,
+    })
+
+
+@app.post("/setup/model")
+async def setup_model(request: Request):
+    """Set the swarm-wide DEFAULT model and re-init all agents to pick it up."""
+    from swarm_server.model_config import set_default_model, detect_global_hermes_model
+
+    body = await request.json()
+    # Convenience: "adopt" the model detected in the user's ~/.hermes.
+    if body.get("adopt_detected"):
+        det = detect_global_hermes_model()
+        if not det.get("model"):
+            return JSONResponse({"error": "No Hermes model detected to adopt."}, status_code=400)
+        body = {
+            "provider": det.get("provider") or "custom", "model": det["model"],
+            "base_url": det.get("base_url", ""), "api_key": det.get("api_key", ""),
+        }
+
+    model = (body.get("model") or "").strip()
+    provider = (body.get("provider") or "custom").strip()
+    base_url = (body.get("base_url") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    if not model:
+        return JSONResponse({"error": "model is required"}, status_code=400)
+
+    set_default_model(provider, model, base_url, api_key)
+    # Re-init every agent so the new default takes effect on its next turn.
+    for name in list(daemons.keys()):
+        _update_daemon_cfg(name, load_agents_config()["agents"].get(name, daemons[name].cfg))
+
+    from swarm_server.websocket import _broadcast
+
+    _broadcast("model_default_updated", {
+        "provider": provider, "model": model, "timestamp": __import__("time").time(),
+    })
+    return JSONResponse({"status": "ok", "provider": provider, "model": model})
+
+
+@app.get("/agent/{agent_name}/config")
+async def get_agent_config(agent_name: str):
+    cfg = load_agents_config()
+    a = cfg["agents"].get(agent_name)
+    if a is None:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+    daemon = daemons.get(agent_name)
+    telemetry = dict(getattr(daemon, "_telemetry", {}) or {}) if daemon else {}
+    return JSONResponse({
+        "agent_name": agent_name,
+        "name": a.get("name", agent_name),
+        "team_id": a.get("team_id"),
+        "model": a.get("model"),  # raw per-agent override (None = inherit default)
+        "effective_model": __import__("swarm_server.model_config", fromlist=["resolve_model"]).resolve_model(a).get("model"),
+        "provider": a.get("provider"),
+        "autonomous": bool(a.get("autonomous", False)),
+        "sweep_interval": a.get("sweep_interval"),
+        "temperature": a.get("temperature"),
+        "max_tokens": a.get("max_tokens"),
+        "reasoning_effort": a.get("reasoning_effort"),
+        "max_iterations": a.get("max_iterations"),
+        "enabled_toolsets": a.get("enabled_toolsets") or [],
+        "disabled_toolsets": a.get("disabled_toolsets") or [],
+        "compression_threshold": a.get("compression_threshold"),
+        "role_soul": a.get("role_soul") or a.get("soul") or "",
+        "allowed_peers": a.get("allowed_peers", []),
+        "hermes_home": str(getattr(daemon, "_hermes_home", "")) if daemon else "",
+        "telemetry": telemetry,
+    })
+
+
+@app.patch("/agent/{agent_name}/config")
+async def patch_agent_config(agent_name: str, request: Request):
+    """Merge UI-editable fields into an agent's stored config and hot-apply them.
+
+    The model / sampling / soul changes take effect on the agent's NEXT turn
+    (forced re-init via _update_daemon_cfg, which nulls the cached AIAgent);
+    autonomous + sweep_interval are refreshed immediately. Empty values for the
+    optional overrides clear them, reverting to the Hermes/global default.
+    """
+    body = await request.json()
+    cfg = load_agents_config()
+    a = cfg["agents"].get(agent_name)
+    if a is None:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+
+    updated = _apply_config_fields(a, body)
+
+    save_agent_config(agent_name, updated)
+    _update_daemon_cfg(agent_name, updated)
+
+    from swarm_server.websocket import _broadcast
+
+    _broadcast("agent_config_updated", {
+        "agent_name": agent_name,
+        "timestamp": __import__("time").time(),
+    })
+    return JSONResponse({"status": "updated", "agent_name": agent_name, "config": updated})
+
+
+@app.get("/toolsets")
+async def get_toolsets():
+    """Available Hermes toolsets (for the allowed/disabled-tools picker)."""
+    return JSONResponse({"toolsets": list_toolsets()})
+
+
+@app.get("/agent/{agent_name}/cli")
+async def get_agent_cli(agent_name: str):
+    """Ready-to-paste Hermes CLI commands for configuring THIS agent in a terminal.
+
+    Each command exports the agent's isolated HERMES_HOME so `hermes` operates on
+    that specific agent's config — letting the operator run the interactive setup
+    wizard (model, gateway/Telegram, tools, …) without the dashboard.
+    """
+    daemon = daemons.get(agent_name)
+    if daemon is None:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+    home = str(daemon._hermes_home)
+    prefix = f"HERMES_HOME='{home}'"
+    commands = [
+        {"label": "Full interactive setup wizard", "cmd": f"{prefix} hermes setup"},
+        {"label": "Model / provider", "cmd": f"{prefix} hermes setup model"},
+        {"label": "Messaging gateways (Telegram, Discord, Slack…)", "cmd": f"{prefix} hermes setup gateway"},
+        {"label": "Tools", "cmd": f"{prefix} hermes setup tools"},
+        {"label": "Agent settings (iterations, compression)", "cmd": f"{prefix} hermes setup agent"},
+        {"label": "Set a single config key", "cmd": f"{prefix} hermes config set model.provider custom"},
+        {"label": "Open a chat REPL as this agent", "cmd": f"{prefix} hermes"},
+    ]
+    return JSONResponse({"agent_name": agent_name, "hermes_home": home, "commands": commands})
+
+
+# ---------------------------------------------------------------------------
+# Self-config Proposals (agent proposes → human approves in the UI)
+# ---------------------------------------------------------------------------
+@app.get("/proposals")
+async def get_proposals():
+    from swarm_server.tools import get_config_proposals
+
+    proposals = get_config_proposals()
+    proposals.sort(key=lambda p: p["timestamp"], reverse=True)
+    return JSONResponse({
+        "proposals": proposals[:200],
+        "pending_count": sum(1 for p in proposals if p["status"] == "pending"),
+    })
+
+
+@app.post("/proposals/{proposal_id}/approve")
+async def approve_proposal(proposal_id: str):
+    from swarm_server.tools import get_config_proposals, resolve_config_proposal
+    from swarm_server.websocket import _broadcast
+
+    target = next((p for p in get_config_proposals() if p["id"] == proposal_id), None)
+    if target is None:
+        return JSONResponse({"error": "proposal not found"}, status_code=404)
+    if target["status"] != "pending":
+        return JSONResponse({"error": f"proposal already {target['status']}"}, status_code=409)
+
+    agent_name = target["agent_name"]
+    cfg = load_agents_config()
+    a = cfg["agents"].get(agent_name)
+    if a is None:
+        resolve_config_proposal(proposal_id, "rejected")
+        return JSONResponse({"error": "agent no longer exists"}, status_code=404)
+
+    updated = _apply_config_fields(a, target["changes"])
+    save_agent_config(agent_name, updated)
+    _update_daemon_cfg(agent_name, updated)
+    resolve_config_proposal(proposal_id, "approved")
+
+    _broadcast("proposal_resolved", {
+        "agent_name": agent_name,
+        "proposal_id": proposal_id,
+        "status": "approved",
+        "timestamp": __import__("time").time(),
+    })
+    # Tell the agent its proposal landed so it can proceed accordingly.
+    daemon = daemons.get(agent_name)
+    if daemon is not None:
+        daemon.ingest_task("human", (
+            f"✅ Your config-change proposal was APPROVED and applied: {target['changes']}. "
+            "It takes effect on this turn (you were re-initialised). Continue your work."
+        ))
+    return JSONResponse({"status": "approved", "agent_name": agent_name, "config": updated})
+
+
+@app.post("/proposals/{proposal_id}/reject")
+async def reject_proposal(proposal_id: str):
+    from swarm_server.tools import resolve_config_proposal
+    from swarm_server.websocket import _broadcast
+
+    resolved = resolve_config_proposal(proposal_id, "rejected")
+    if resolved is None:
+        return JSONResponse({"error": "proposal not found"}, status_code=404)
+    _broadcast("proposal_resolved", {
+        "agent_name": resolved["agent_name"],
+        "proposal_id": proposal_id,
+        "status": "rejected",
+        "timestamp": __import__("time").time(),
+    })
+    return JSONResponse({"status": "rejected", "proposal_id": proposal_id})
+
+
+# ---------------------------------------------------------------------------
 # Monitoring Routes
 # ---------------------------------------------------------------------------
 @app.get("/monitoring/agents")
@@ -424,6 +722,7 @@ async def monitoring_agents(team_id: str = None):
             "next_sweep_at": d.next_sweep_at,
             "config": d.cfg,
             "allowed_peers": d.cfg.get("allowed_peers", []),
+            "telemetry": dict(getattr(d, "_telemetry", {}) or {}),
         }
     return JSONResponse({
         "agents": result,

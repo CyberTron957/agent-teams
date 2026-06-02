@@ -1,6 +1,7 @@
 """Agent daemon wrapper around a Hermes AIAgent instance."""
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -15,6 +16,7 @@ from swarm_server.config import (
     AUTONOMOUS_HEARTBEAT_PROMPT,
     AUTONOMOUS_HEARTBEAT_SECONDS,
     LITELLM_API_BASE,
+    LLM_API_KEY,
     LLM_ERROR_EMIT_THROTTLE_SECONDS,
     MAX_BATCH_SIZE,
     MAX_TASK_RETRIES,
@@ -36,7 +38,7 @@ from swarm_server.tools import (
     _daemon_registry,
     _register_custom_tools,
 )
-from swarm_server.websocket import _agent_init_lock, _broadcast
+from swarm_server.websocket import _agent_init_lock, _broadcast, ws_broadcaster
 
 log = logging.getLogger("swarm.agent")
 
@@ -44,13 +46,14 @@ AGENT_STATE_IDLE = "idle"
 AGENT_STATE_BUSY = "busy"
 AGENT_STATE_ASKING_HUMAN = "asking_human"
 
-HERMES_AGENT_PATH = "/Users/pradhyun/.hermes/hermes-agent"
-
-
 def _ensure_hermes_on_path() -> None:
-    """Add the Hermes package dir to sys.path exactly once (no duplicate growth)."""
-    if HERMES_AGENT_PATH not in sys.path:
-        sys.path.insert(0, HERMES_AGENT_PATH)
+    """Make the Hermes package importable (pip install / PYTHONPATH / checkout).
+
+    Delegates to config.ensure_hermes_importable so resolution is defined in one
+    place (see its docstring for the lookup order)."""
+    from swarm_server.config import ensure_hermes_importable
+
+    ensure_hermes_importable()
 
 
 def _set_hermes_home_override(home: Any) -> Optional[Any]:
@@ -144,6 +147,23 @@ class AgentDaemon:
         # Throttle for the "LLM provider unreachable" UI message so a sustained
         # outage doesn't post one error per 10s sweep tick.
         self._last_llm_error_emit = 0.0
+        # Per-agent sweep interval (falls back to the global default). Lets the UI
+        # tune how often a specific agent polls its queue.
+        self._sweep_interval = self._resolve_sweep_interval(cfg)
+        # Monotonic sequence for ephemeral live-execution events (exec_*). Lets the
+        # dashboard order/dedupe the streamed thinking/tool/answer steps per turn.
+        self._exec_seq = 0
+        # Latest runtime telemetry (context usage, token spend, window, threshold),
+        # refreshed at the end of each turn and surfaced read-only in the UI.
+        self._telemetry: Dict[str, Any] = {}
+
+    @staticmethod
+    def _resolve_sweep_interval(cfg: Dict[str, Any]) -> float:
+        try:
+            v = float(cfg.get("sweep_interval") or 0)
+            return v if v >= 1 else float(SWEEP_INTERVAL_SECONDS)
+        except (TypeError, ValueError):
+            return float(SWEEP_INTERVAL_SECONDS)
 
     @staticmethod
     def _is_infra_failure(err: str) -> bool:
@@ -207,10 +227,33 @@ class AgentDaemon:
                 team_id = self.cfg.get("team_id", "default")
                 cdp_url = team_browser_manager.ensure_team_browser(team_id)
 
+                # Per-agent model + sampling knobs (configurable from the UI;
+                # fall back to the proxy default / Hermes defaults when unset).
+                # Effective backend: per-agent override → swarm default → proxy.
+                from swarm_server.model_config import resolve_model
+
+                eff = resolve_model(self.cfg)
+                model = eff["model"]
+                _eff_base = eff["base_url"] or None
+                _eff_key = eff["api_key"] or None
+                _eff_provider = eff["provider"] or None
+                log.info("[%s] model: %s (provider=%s, source=%s)",
+                         self.name, model, eff["provider"], eff["source"])
+                _ct = self.cfg.get("compression_threshold")
+                try:
+                    compression_threshold = float(_ct) if _ct not in (None, "") else None
+                except (TypeError, ValueError):
+                    compression_threshold = None
+
                 # Enable Hermes' built-in context/session compression for this
                 # agent. Must be written before AIAgent() so init_agent picks it
-                # up from {HERMES_HOME}/config.yaml.
-                write_agent_hermes_config(self._hermes_home, cdp_url=cdp_url)
+                # up from {HERMES_HOME}/config.yaml. The resolved backend is pinned
+                # here too so the default + auxiliary tasks match the agent's model.
+                write_agent_hermes_config(
+                    self._hermes_home, cdp_url=cdp_url, model=model,
+                    compression_threshold=compression_threshold,
+                    provider=eff["provider"], base_url=eff["base_url"], api_key=eff["api_key"],
+                )
 
                 # CRITICAL: bind the session DB to THIS agent's home explicitly.
                 # Hermes computes `DEFAULT_DB_PATH = get_hermes_home()/state.db`
@@ -256,17 +299,65 @@ class AgentDaemon:
                 self._base_ephemeral = compose_agent_soul(
                     soul_cfg, full_cfg, include_role=False
                 )
+                # Advanced sampling knobs — only passed when explicitly set so an
+                # unset value keeps Hermes' own default. temperature rides through
+                # request_overrides (Hermes clamps/omits it per-model as needed);
+                # reasoning_effort maps to Hermes' reasoning_config dict.
+                extra_kwargs: Dict[str, Any] = {}
+                mt = self.cfg.get("max_tokens")
+                if mt:
+                    try:
+                        extra_kwargs["max_tokens"] = int(mt)
+                    except (TypeError, ValueError):
+                        pass
+                temp = self.cfg.get("temperature")
+                if temp is not None and temp != "":
+                    try:
+                        extra_kwargs["request_overrides"] = {"temperature": float(temp)}
+                    except (TypeError, ValueError):
+                        pass
+                effort = (self.cfg.get("reasoning_effort") or "").strip().lower()
+                if effort in ("low", "medium", "high"):
+                    extra_kwargs["reasoning_config"] = {"enabled": True, "effort": effort}
+                elif effort == "off":
+                    extra_kwargs["reasoning_config"] = {"enabled": False}
+
+                # provider/base_url/api_key come from the resolver (eff), set below.
+                mi = self.cfg.get("max_iterations")
+                if mi:
+                    try:
+                        extra_kwargs["max_iterations"] = int(mi)
+                    except (TypeError, ValueError):
+                        pass
+                # Toolset whitelists/blacklists — accept a list or comma string.
+                def _as_list(v):
+                    if isinstance(v, list):
+                        return [str(x).strip() for x in v if str(x).strip()]
+                    if isinstance(v, str) and v.strip():
+                        return [s.strip() for s in v.split(",") if s.strip()]
+                    return None
+                en_ts = _as_list(self.cfg.get("enabled_toolsets"))
+                if en_ts:
+                    extra_kwargs["enabled_toolsets"] = en_ts
+                dis_ts = _as_list(self.cfg.get("disabled_toolsets"))
+                if dis_ts:
+                    extra_kwargs["disabled_toolsets"] = dis_ts
+
+                if _eff_provider:
+                    extra_kwargs["provider"] = _eff_provider
                 self._ai_agent = AIAgent(
-                    base_url=LITELLM_API_BASE,
-                    api_key="sk-1234",
-                    model="litellm-model",
+                    base_url=_eff_base,
+                    api_key=_eff_key,
+                    model=model,
                     session_id=self.cfg["session_id"],
                     skip_memory=False,
                     skip_context_files=False,
                     quiet_mode=True,
                     ephemeral_system_prompt=self._base_ephemeral,
                     session_db=agent_session_db,
+                    **extra_kwargs,
                 )
+                self._wire_live_callbacks()
                 _register_custom_tools()
 
                 existing_names = {
@@ -285,6 +376,20 @@ class AgentDaemon:
                     self._ai_agent.tools = list(self._ai_agent.tools or [])
                     self._ai_agent.tools.append(_LOG_CHANGES_TOOL_SCHEMA)
                     self._ai_agent.valid_tool_names.add("log_changes")
+                # Self-awareness: read own config/telemetry + PROPOSE changes
+                # (human approves in the UI — agents cannot self-apply).
+                from swarm_server.tools import (
+                    _GET_SELF_CONFIG_TOOL_SCHEMA,
+                    _REQUEST_CONFIG_CHANGE_TOOL_SCHEMA,
+                )
+                if "get_self_config" not in existing_names:
+                    self._ai_agent.tools = list(self._ai_agent.tools or [])
+                    self._ai_agent.tools.append(_GET_SELF_CONFIG_TOOL_SCHEMA)
+                    self._ai_agent.valid_tool_names.add("get_self_config")
+                if "request_config_change" not in existing_names:
+                    self._ai_agent.tools = list(self._ai_agent.tools or [])
+                    self._ai_agent.tools.append(_REQUEST_CONFIG_CHANGE_TOOL_SCHEMA)
+                    self._ai_agent.valid_tool_names.add("request_config_change")
 
                 # Force tool-use enforcement guidance — agents must end their turn
                 # with a tool call (send_peer_message / ask_human) rather than
@@ -382,6 +487,22 @@ class AgentDaemon:
         with self._lock:
             self._stop_requested = True
 
+        # ACTUALLY halt the in-flight turn. Cancelling the asyncio sweep task and
+        # shutting the executor below do NOT stop the Hermes turn — it runs on a
+        # worker thread Python cannot kill, so without this the agent keeps going
+        # to completion (the bug). Hermes' interrupt() sets _interrupt_requested
+        # (checked at each tool-loop iteration) and thread-scopes a tool abort, so
+        # the turn unwinds at the next boundary. We also release a turn parked
+        # inside ask_human (it blocks on human_event).
+        try:
+            agent = self._ai_agent
+            if agent is not None and hasattr(agent, "interrupt"):
+                agent.interrupt("Execution stopped by the operator.")
+                log.info("[%s] Sent interrupt() to in-flight Hermes turn", self.name)
+        except Exception as e:
+            log.debug("[%s] interrupt() failed: %s", self.name, e)
+        self.human_event.set()
+
         # Cancel the sweep task. If run_conversation is in-flight the
         # thread keeps going, but the sweep coroutine never handles the
         # result — any post-run work is skipped because _stop_requested
@@ -407,11 +528,15 @@ class AgentDaemon:
             max_workers=1, thread_name_prefix=f"agent-{self.name}"
         )
 
-        # Reset flags and state
+        # Reset flags and state. Drop the cached AIAgent so the NEXT turn re-inits
+        # with a clean interrupt state (the interrupt flag we just set would
+        # otherwise persist and abort the next turn immediately). Re-init reloads
+        # history from the session DB, so nothing is lost.
         with self._lock:
             self._stop_requested = False
+            self._ai_agent = None
             self.state = AGENT_STATE_IDLE
-            self.next_sweep_at = time.time() + SWEEP_INTERVAL_SECONDS
+            self.next_sweep_at = time.time() + self._sweep_interval
         self._emit_state_change()
 
         # Restart the sweep loop on the same event loop
@@ -467,12 +592,12 @@ class AgentDaemon:
         monitor_db.log_event(self.name, "state_change", data={"new_state": self.state})
 
     async def sweep_loop(self):
-        log.info("[%s] Sweep loop started (interval=%ds, event-driven)", self.name, SWEEP_INTERVAL_SECONDS)
+        log.info("[%s] Sweep loop started (interval=%ss, event-driven)", self.name, self._sweep_interval)
         while True:
-            self.next_sweep_at = time.time() + SWEEP_INTERVAL_SECONDS
+            self.next_sweep_at = time.time() + self._sweep_interval
             # Wake on a new task, or fall through on the periodic safety tick.
             try:
-                await asyncio.wait_for(self._wake.wait(), timeout=SWEEP_INTERVAL_SECONDS)
+                await asyncio.wait_for(self._wake.wait(), timeout=self._sweep_interval)
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
@@ -507,7 +632,7 @@ class AgentDaemon:
             self._last_active = time.time()
             with self._lock:
                 self.state = AGENT_STATE_IDLE
-                self.next_sweep_at = time.time() + SWEEP_INTERVAL_SECONDS
+                self.next_sweep_at = time.time() + self._sweep_interval
             self._emit_state_change()
             # More queued while we were busy? Wake immediately rather than wait.
             try:
@@ -540,7 +665,116 @@ class AgentDaemon:
         self._last_active = time.time()
         log.info("[%s] Autonomous heartbeat — injecting continue-mission task", self.name)
         monitor_db.log_event(self.name, "autonomous_heartbeat", data={})
-        self.ingest_task("autonomous", AUTONOMOUS_HEARTBEAT_PROMPT)
+        import datetime
+        prompt = AUTONOMOUS_HEARTBEAT_PROMPT.format(
+            time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        )
+        self.ingest_task("autonomous", prompt)
+
+    # ------------------------------------------------------------------
+    # Live execution streaming (ephemeral; dashboard-only)
+    # ------------------------------------------------------------------
+    def _emit_exec(self, kind: str, data: Dict[str, Any]) -> None:
+        """Broadcast one ephemeral live-execution step (thinking/tool/answer).
+
+        Purely for the dashboard's real-time trace — NOT persisted to
+        monitoring.db (the final answer + tool calls are still logged at the end
+        of the batch as before). Skipped entirely when no dashboard is connected
+        so a 24/7 swarm pays nothing for this when nobody is watching (matters for
+        the high-frequency token stream). Runs on the agent's worker thread;
+        _broadcast hops to the event loop thread-safely.
+        """
+        try:
+            if not ws_broadcaster.clients:
+                return
+            self._exec_seq += 1
+            payload = {
+                "agent_name": self.name,
+                "seq": self._exec_seq,
+                "kind": kind,
+                "timestamp": time.time(),
+            }
+            payload.update(data)
+            _broadcast("agent_exec", payload)
+        except Exception:
+            pass
+
+    def _collect_telemetry(self) -> Dict[str, Any]:
+        """Snapshot runtime telemetry from the live AIAgent (read-only, defensive).
+
+        Read after each turn for the UI: current context occupancy, cumulative
+        token spend + cost, the model's context window, and the compaction
+        trigger. All getattr-guarded so a Hermes version difference degrades to
+        a partial dict instead of raising.
+        """
+        a = self._ai_agent
+        if a is None:
+            return {}
+        t: Dict[str, Any] = {}
+        try:
+            cc = getattr(a, "context_compressor", None)
+            if cc is not None:
+                t["context_tokens"] = int(getattr(cc, "last_prompt_tokens", 0) or 0)
+                t["context_window"] = int(getattr(cc, "context_length", 0) or 0)
+                t["compress_threshold_tokens"] = int(getattr(cc, "threshold_tokens", 0) or 0)
+            t["session_total_tokens"] = int(getattr(a, "session_total_tokens", 0) or 0)
+            t["session_input_tokens"] = int(getattr(a, "session_input_tokens", 0) or 0)
+            t["session_output_tokens"] = int(getattr(a, "session_output_tokens", 0) or 0)
+            t["session_cost_usd"] = round(float(getattr(a, "session_estimated_cost_usd", 0.0) or 0.0), 4)
+            t["max_iterations"] = int(getattr(a, "max_iterations", 0) or 0)
+            t["model"] = getattr(a, "model", None)
+            t["provider"] = getattr(a, "provider", None)
+            if t.get("context_window"):
+                t["context_pct"] = round(100.0 * t.get("context_tokens", 0) / t["context_window"], 1)
+        except Exception as e:
+            log.debug("[%s] telemetry collect failed: %s", self.name, e)
+        self._telemetry = t
+        return t
+
+    def _wire_live_callbacks(self) -> None:
+        """Attach Hermes' progress callbacks to the live-exec broadcaster.
+
+        Hermes invokes these on the conversation thread as the turn unfolds:
+        thinking (status pulse), reasoning (chain-of-thought text), tool start /
+        complete, and stream_delta (final-answer tokens). We forward each as an
+        'agent_exec' WS event so the UI can render the turn as it happens.
+        """
+        a = self._ai_agent
+        if a is None:
+            return
+
+        def on_thinking(text: str = "") -> None:
+            self._emit_exec("thinking", {"text": (text or "")[:200]})
+
+        def on_reasoning(text: str = "") -> None:
+            if text:
+                self._emit_exec("reasoning", {"text": str(text)[:4000]})
+
+        def on_tool_start(tool_call_id, name, args) -> None:
+            try:
+                args_str = args if isinstance(args, str) else json.dumps(args, default=str)
+            except Exception:
+                args_str = str(args)
+            self._emit_exec("tool_start", {
+                "id": str(tool_call_id), "name": str(name), "args": (args_str or "")[:1500],
+            })
+
+        def on_tool_complete(tool_call_id, name, args, result) -> None:
+            self._emit_exec("tool_result", {
+                "id": str(tool_call_id), "name": str(name),
+                "result": ("" if result is None else str(result))[:2000],
+            })
+
+        def on_stream_delta(chunk) -> None:
+            # None is Hermes' flush/end sentinel — ignore it; only forward text.
+            if chunk:
+                self._emit_exec("token", {"text": str(chunk)})
+
+        a.thinking_callback = on_thinking
+        a.reasoning_callback = on_reasoning
+        a.tool_start_callback = on_tool_start
+        a.tool_complete_callback = on_tool_complete
+        a.stream_delta_callback = on_stream_delta
 
     def _run_conversation_blocking(self, combined: str) -> Dict[str, Any]:
         """Synchronous body executed on this agent's dedicated worker thread.
@@ -683,6 +917,18 @@ class AgentDaemon:
                 )
             except Exception as e:
                 log.debug("[%s] token usage logging failed: %s", self.name, e)
+
+            # Refresh + broadcast read-only runtime telemetry for the UI.
+            try:
+                tel = self._collect_telemetry()
+                if tel:
+                    _broadcast("telemetry", {
+                        "agent_name": self.name,
+                        "telemetry": tel,
+                        "timestamp": time.time(),
+                    })
+            except Exception as e:
+                log.debug("[%s] telemetry broadcast failed: %s", self.name, e)
 
             new_messages = response.get("messages", [])
             final = str(response.get("final_response", ""))
