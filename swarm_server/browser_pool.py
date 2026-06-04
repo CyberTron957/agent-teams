@@ -17,6 +17,7 @@ precedence over both the cloud provider and the local launcher — so it works
 without cloud credentials and reuses the Playwright Chromium we install locally.
 """
 
+import asyncio
 import glob
 import logging
 import os
@@ -73,11 +74,13 @@ class TeamBrowserManager:
         # team_id -> {"proc": Popen, "port": int, "profile": str}
         self._browsers: Dict[str, dict] = {}
         self._ports: Dict[str, int] = {}
-        # ONE hidden Xvfb display shared by all team browsers (headful but offscreen).
+        # Xvfb is only a FALLBACK display for headless hosts with no real X server.
         self._xvfb_proc: Optional[subprocess.Popen] = None
         self._xvfb_display: Optional[str] = None
-        # team_id -> desired DISPLAY (hidden Xvfb normally; real screen on takeover).
-        self._team_display: Dict[str, str] = {}
+        # team_id -> the ONE display its browser is pinned to for life (never moved).
+        self._team_disp: Dict[str, str] = {}
+        # teams whose browser is currently handed to a human (window restored/raised).
+        self._takeover_active: set = set()
         self._chromium = _find_chromium()
         if self._chromium:
             log.info("Team browser pool using chromium: %s", self._chromium)
@@ -113,19 +116,56 @@ class TeamBrowserManager:
         except Exception:
             return False
 
-    # -- virtual display / human takeover -----------------------------------
-    def _ensure_xvfb(self) -> str:
-        """Lazily start ONE hidden Xvfb display shared by all team browsers.
+    # -- display selection --------------------------------------------------
+    @staticmethod
+    def _display_socket_exists(disp: str) -> bool:
+        """True if an X server is listening on a DISPLAY like ':0' (socket present)."""
+        try:
+            num = (disp or "").strip().lstrip(":").split(".")[0]
+            return bool(num) and os.path.exists(f"/tmp/.X11-unix/X{num}")
+        except Exception:
+            return False
 
-        Headful Chrome on this display is invisible to the user but defeats
-        headless fingerprinting. Falls back to the real $DISPLAY (or ':2') when
-        Xvfb is unavailable, so the pool still works on a plain desktop.
+    def _pick_display(self, team_id: str) -> str:
+        """Choose, ONCE per team, the display the browser lives on for its whole
+        life. Robust on any host:
+          1. SWARM_BROWSER_DISPLAY override (explicit escape hatch),
+          2. the display the server was launched in (if live) — what a local
+             user actually sees,
+          3. the first conventional real seat (:0, :1),
+          4. our own hidden Xvfb (headless hosts; human view then needs VNC).
+        The browser is NEVER moved off this display — visibility is handled in
+        place via CDP, so there is no relaunch and the agent's CDP session is
+        never broken.
         """
+        if team_id in self._team_disp:
+            return self._team_disp[team_id]
+        disp = None
+        override = os.environ.get("SWARM_BROWSER_DISPLAY", "").strip()
+        if override:
+            disp = override
+        elif self._display_socket_exists(os.environ.get("DISPLAY", "")):
+            disp = os.environ.get("DISPLAY", "").strip()
+        else:
+            for cand in (":0", ":1"):
+                if self._display_socket_exists(cand):
+                    disp = cand
+                    break
+        if not disp:
+            disp = self._ensure_xvfb()  # headless host fallback
+        self._team_disp[team_id] = disp
+        log.info("[%s] Browser display pinned to %s", team_id, disp)
+        return disp
+
+    def _ensure_xvfb(self) -> str:
+        """Start ONE hidden Xvfb as a FALLBACK display for headless hosts with no
+        real X server. Returns the DISPLAY string; falls back to ':0' if Xvfb
+        itself is unavailable so callers always get something usable."""
         if self._xvfb_display and self._xvfb_proc and self._xvfb_proc.poll() is None:
             return self._xvfb_display
         xvfb = shutil.which("Xvfb")
         if not xvfb:
-            self._xvfb_display = os.environ.get("DISPLAY") or ":2"
+            self._xvfb_display = os.environ.get("DISPLAY") or ":0"
             return self._xvfb_display
         for num in range(99, 130):
             if os.path.exists(f"/tmp/.X11-unix/X{num}"):
@@ -144,31 +184,103 @@ class TeamBrowserManager:
                 if os.path.exists(f"/tmp/.X11-unix/X{num}"):
                     self._xvfb_proc = proc
                     self._xvfb_display = disp
-                    log.info("Hidden Xvfb display ready: %s", disp)
+                    log.info("Fallback Xvfb display ready: %s", disp)
                     return disp
                 time.sleep(0.1)
             self._terminate(proc)
-        self._xvfb_display = os.environ.get("DISPLAY") or ":2"
+        self._xvfb_display = os.environ.get("DISPLAY") or ":0"
         return self._xvfb_display
 
-    def begin_takeover(self, team_id: str, display: Optional[str] = None) -> Optional[str]:
-        """Bring the team browser onto a VISIBLE display for a human takeover.
+    # -- human takeover (in-place window control over CDP; NO relaunch) ------
+    @staticmethod
+    def _run_coro_in_thread(coro_factory, timeout: float = 30.0) -> bool:
+        """Run an async coroutine to completion in a throwaway thread+loop.
 
-        Relaunches the SAME persistent profile on the real desktop so the human
-        can log in / solve a challenge; cookies persist via the profile. The CDP
-        port is reused, so the returned CDP URL is unchanged.
+        Safe whether the caller is on a plain worker thread (agent tool) OR on
+        the server's asyncio event loop (inbox endpoint) — we never touch the
+        caller's loop, so 'asyncio.run() inside a running loop' can't happen.
         """
-        target = (display or os.environ.get("HANDOFF_DISPLAY")
-                  or os.environ.get("DISPLAY") or ":2")
+        box = {"ok": False, "err": None}
+
+        def runner():
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(coro_factory())
+                box["ok"] = True
+            except Exception as e:  # noqa: BLE001
+                box["err"] = e
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=runner, daemon=True)
+        t.start()
+        t.join(timeout)
+        if box["err"] is not None:
+            log.warning("CDP window op failed: %s", box["err"])
+        return box["ok"]
+
+    def _cdp_set_window(self, team_id: str, show: bool) -> bool:
+        """Show (restore + raise) or hide (minimize) the team browser window
+        PURELY over CDP — no window manager, no xdotool, no relaunch. Best-effort:
+        returns False (logged) on any failure rather than raising, so a takeover
+        never crashes the agent."""
         with self._lock:
-            self._team_display[team_id] = target
-        return self.ensure_team_browser(team_id)
+            info = self._browsers.get(team_id)
+        if not info:
+            return False
+        cdp = f"http://127.0.0.1:{info['port']}"
+
+        async def work():
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                # connect_over_cdp().close() only DISconnects our client; it never
+                # kills the browser the agent is also using.
+                b = await p.chromium.connect_over_cdp(cdp)
+                try:
+                    ctx = b.contexts[0] if b.contexts else await b.new_context()
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    s = await ctx.new_cdp_session(page)
+                    wid = (await s.send("Browser.getWindowForTarget"))["windowId"]
+                    if show:
+                        # Un-minimize FIRST, then position on-screen (safe order).
+                        await s.send("Browser.setWindowBounds",
+                                     {"windowId": wid, "bounds": {"windowState": "normal"}})
+                        await s.send("Browser.setWindowBounds",
+                                     {"windowId": wid, "bounds":
+                                      {"left": 60, "top": 60, "width": 1280, "height": 820}})
+                        try:
+                            await page.bring_to_front()
+                        except Exception:
+                            pass
+                    else:
+                        await s.send("Browser.setWindowBounds",
+                                     {"windowId": wid, "bounds": {"windowState": "minimized"}})
+                finally:
+                    await b.close()
+
+        return self._run_coro_in_thread(work)
+
+    def begin_takeover(self, team_id: str, display: Optional[str] = None) -> Optional[str]:
+        """Hand the live browser to a human: restore + raise its window IN PLACE
+        (no relaunch, so the agent's CDP session survives). Returns the unchanged
+        CDP URL. `display` is accepted for backward-compat but ignored — the
+        browser is pinned to one display for life."""
+        cdp = self.ensure_team_browser(team_id)
+        with self._lock:
+            self._takeover_active.add(team_id)
+        self._cdp_set_window(team_id, show=True)
+        return cdp
 
     def end_takeover(self, team_id: str) -> Optional[str]:
-        """Send the team browser back to the hidden display after a takeover."""
+        """Hand control back: minimize the window IN PLACE (no relaunch)."""
         with self._lock:
-            self._team_display[team_id] = self._ensure_xvfb()
-        return self.ensure_team_browser(team_id)
+            self._takeover_active.discard(team_id)
+            info = self._browsers.get(team_id)
+        self._cdp_set_window(team_id, show=False)
+        return f"http://127.0.0.1:{info['port']}" if info else None
 
     # -- lifecycle ----------------------------------------------------------
     def ensure_team_browser(self, team_id: str) -> Optional[str]:
@@ -180,11 +292,11 @@ class TeamBrowserManager:
         if not self._chromium:
             return None
         with self._lock:
-            desired_display = self._team_display.get(team_id) or self._ensure_xvfb()
             info = self._browsers.get(team_id)
-            if (info and info["proc"].poll() is None and self._healthy(info["port"])
-                    and info.get("display") == desired_display):
+            if info and info["proc"].poll() is None and self._healthy(info["port"]):
                 return f"http://127.0.0.1:{info['port']}"
+
+            display = self._pick_display(team_id)
 
             # Reuse the team's port across relaunches so the cdp_url written into
             # agent configs stays valid within a server run.
@@ -203,10 +315,11 @@ class TeamBrowserManager:
                 except OSError:
                     pass
 
-            # Headful (NO --headless) so the browser passes headless fingerprinting;
-            # it lives on a hidden Xvfb display by default and is moved to the real
-            # screen only during a human takeover. Turning AutomationControlled off
-            # makes navigator.webdriver report false.
+            # Headful (NO --headless) so the browser passes headless fingerprinting
+            # (webdriver=false via AutomationControlled off). It is pinned to ONE
+            # display for life and kept MINIMIZED during normal work; the
+            # anti-throttle flags keep it painting — so the agent can still
+            # screenshot/drive it even while minimized and invisible to the user.
             args = [
                 self._chromium,
                 f"--remote-debugging-port={port}",
@@ -217,6 +330,9 @@ class TeamBrowserManager:
                 "--no-default-browser-check",
                 "--disable-dev-shm-usage",
                 "--disable-background-networking",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-background-timer-throttling",
                 "--window-size=1280,800",
                 "about:blank",
             ]
@@ -229,7 +345,7 @@ class TeamBrowserManager:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
-                    env={**os.environ, "DISPLAY": desired_display},
+                    env={**os.environ, "DISPLAY": display},
                 )
             except Exception as e:
                 log.error("[%s] Failed to launch team browser: %s", team_id, e)
@@ -237,24 +353,31 @@ class TeamBrowserManager:
 
             self._browsers[team_id] = {
                 "proc": proc, "port": port, "profile": str(profile),
-                "display": desired_display,
+                "display": display,
             }
             self._ports[team_id] = port
 
             # Wait (≤10s) for the CDP endpoint to come up.
+            ready = False
             for _ in range(50):
                 if proc.poll() is not None:
                     log.error("[%s] Team browser exited during startup", team_id)
                     return None
                 if self._healthy(port):
-                    log.info(
-                        "[%s] Team browser ready on port %d (profile=%s)",
-                        team_id, port, profile,
-                    )
-                    return f"http://127.0.0.1:{port}"
+                    log.info("[%s] Team browser ready on port %d display=%s (profile=%s)",
+                             team_id, port, display, profile)
+                    ready = True
+                    break
                 time.sleep(0.2)
-            log.error("[%s] Team browser did not become healthy on port %d", team_id, port)
-            return None
+            if not ready:
+                log.error("[%s] Team browser did not become healthy on port %d", team_id, port)
+                return None
+
+        # Outside the lock: tuck the window away (minimized) unless this team is
+        # mid-takeover. Best-effort — the agent can drive a minimized window fine.
+        if team_id not in self._takeover_active:
+            self._cdp_set_window(team_id, show=False)
+        return f"http://127.0.0.1:{port}"
 
     @staticmethod
     def _terminate(proc: subprocess.Popen) -> None:
