@@ -20,6 +20,7 @@ without cloud credentials and reuses the Playwright Chromium we install locally.
 import glob
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -72,6 +73,11 @@ class TeamBrowserManager:
         # team_id -> {"proc": Popen, "port": int, "profile": str}
         self._browsers: Dict[str, dict] = {}
         self._ports: Dict[str, int] = {}
+        # ONE hidden Xvfb display shared by all team browsers (headful but offscreen).
+        self._xvfb_proc: Optional[subprocess.Popen] = None
+        self._xvfb_display: Optional[str] = None
+        # team_id -> desired DISPLAY (hidden Xvfb normally; real screen on takeover).
+        self._team_display: Dict[str, str] = {}
         self._chromium = _find_chromium()
         if self._chromium:
             log.info("Team browser pool using chromium: %s", self._chromium)
@@ -107,6 +113,63 @@ class TeamBrowserManager:
         except Exception:
             return False
 
+    # -- virtual display / human takeover -----------------------------------
+    def _ensure_xvfb(self) -> str:
+        """Lazily start ONE hidden Xvfb display shared by all team browsers.
+
+        Headful Chrome on this display is invisible to the user but defeats
+        headless fingerprinting. Falls back to the real $DISPLAY (or ':2') when
+        Xvfb is unavailable, so the pool still works on a plain desktop.
+        """
+        if self._xvfb_display and self._xvfb_proc and self._xvfb_proc.poll() is None:
+            return self._xvfb_display
+        xvfb = shutil.which("Xvfb")
+        if not xvfb:
+            self._xvfb_display = os.environ.get("DISPLAY") or ":2"
+            return self._xvfb_display
+        for num in range(99, 130):
+            if os.path.exists(f"/tmp/.X11-unix/X{num}"):
+                continue
+            disp = f":{num}"
+            try:
+                proc = subprocess.Popen(
+                    [xvfb, disp, "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except Exception as e:
+                log.error("Failed to start Xvfb: %s", e)
+                break
+            for _ in range(30):
+                if os.path.exists(f"/tmp/.X11-unix/X{num}"):
+                    self._xvfb_proc = proc
+                    self._xvfb_display = disp
+                    log.info("Hidden Xvfb display ready: %s", disp)
+                    return disp
+                time.sleep(0.1)
+            self._terminate(proc)
+        self._xvfb_display = os.environ.get("DISPLAY") or ":2"
+        return self._xvfb_display
+
+    def begin_takeover(self, team_id: str, display: Optional[str] = None) -> Optional[str]:
+        """Bring the team browser onto a VISIBLE display for a human takeover.
+
+        Relaunches the SAME persistent profile on the real desktop so the human
+        can log in / solve a challenge; cookies persist via the profile. The CDP
+        port is reused, so the returned CDP URL is unchanged.
+        """
+        target = (display or os.environ.get("HANDOFF_DISPLAY")
+                  or os.environ.get("DISPLAY") or ":2")
+        with self._lock:
+            self._team_display[team_id] = target
+        return self.ensure_team_browser(team_id)
+
+    def end_takeover(self, team_id: str) -> Optional[str]:
+        """Send the team browser back to the hidden display after a takeover."""
+        with self._lock:
+            self._team_display[team_id] = self._ensure_xvfb()
+        return self.ensure_team_browser(team_id)
+
     # -- lifecycle ----------------------------------------------------------
     def ensure_team_browser(self, team_id: str) -> Optional[str]:
         """Return the team's CDP URL, launching/healing the browser as needed.
@@ -117,8 +180,10 @@ class TeamBrowserManager:
         if not self._chromium:
             return None
         with self._lock:
+            desired_display = self._team_display.get(team_id) or self._ensure_xvfb()
             info = self._browsers.get(team_id)
-            if info and info["proc"].poll() is None and self._healthy(info["port"]):
+            if (info and info["proc"].poll() is None and self._healthy(info["port"])
+                    and info.get("display") == desired_display):
                 return f"http://127.0.0.1:{info['port']}"
 
             # Reuse the team's port across relaunches so the cdp_url written into
@@ -138,17 +203,21 @@ class TeamBrowserManager:
                 except OSError:
                     pass
 
+            # Headful (NO --headless) so the browser passes headless fingerprinting;
+            # it lives on a hidden Xvfb display by default and is moved to the real
+            # screen only during a human takeover. Turning AutomationControlled off
+            # makes navigator.webdriver report false.
             args = [
                 self._chromium,
                 f"--remote-debugging-port={port}",
                 "--remote-debugging-address=127.0.0.1",
                 f"--user-data-dir={profile}",
-                "--headless=new",
+                "--disable-blink-features=AutomationControlled",
                 "--no-first-run",
                 "--no-default-browser-check",
-                "--disable-gpu",
                 "--disable-dev-shm-usage",
                 "--disable-background-networking",
+                "--window-size=1280,800",
                 "about:blank",
             ]
             try:
@@ -160,12 +229,16 @@ class TeamBrowserManager:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
+                    env={**os.environ, "DISPLAY": desired_display},
                 )
             except Exception as e:
                 log.error("[%s] Failed to launch team browser: %s", team_id, e)
                 return None
 
-            self._browsers[team_id] = {"proc": proc, "port": port, "profile": str(profile)}
+            self._browsers[team_id] = {
+                "proc": proc, "port": port, "profile": str(profile),
+                "display": desired_display,
+            }
             self._ports[team_id] = port
 
             # Wait (≤10s) for the CDP endpoint to come up.
@@ -217,6 +290,10 @@ class TeamBrowserManager:
                 log.info("[%s] Stopping team browser (port %d)", team_id, info["port"])
                 self._terminate(info["proc"])
             self._browsers.clear()
+            if self._xvfb_proc is not None:
+                self._terminate(self._xvfb_proc)
+                self._xvfb_proc = None
+                self._xvfb_display = None
 
 
 # Process-wide singleton.

@@ -1127,6 +1127,13 @@ async def respond_to_human_question(agent_name: str, request: Request):
         # (e.g. log in and publish). This is what lets the swarm survive a human
         # who answers hours later — the request never gets lost.
         daemon.human_event.set()  # harmless if nothing is waiting
+        # If this was a browser takeover the human did out-of-turn, send the
+        # browser back to its hidden display now (no-op for ordinary questions).
+        try:
+            from swarm_server.browser_pool import team_browser_manager
+            team_browser_manager.end_takeover((daemon.cfg or {}).get("team_id", "default"))
+        except Exception as _e:
+            log.warning("[Inbox] end_takeover after delayed answer failed: %s", _e)
         resume_msg = (
             "✅ The human answered a question you were blocked on.\n\n"
             f"Your question: {question_text}\n"

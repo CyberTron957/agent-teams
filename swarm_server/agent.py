@@ -472,6 +472,13 @@ class AgentDaemon:
                     self._ai_agent.tools = list(self._ai_agent.tools or [])
                     self._ai_agent.tools.append(_ASK_HUMAN_TOOL_SCHEMA)
                     self._ai_agent.valid_tool_names.add("ask_human")
+                # Browser handoff: agent hands the live browser to a human for a
+                # login / CAPTCHA / verification step, then resumes (see tools.py).
+                if "request_human_takeover" not in existing_names and "request_human_takeover" not in disabled:
+                    from swarm_server.tools import _REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA
+                    self._ai_agent.tools = list(self._ai_agent.tools or [])
+                    self._ai_agent.tools.append(_REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA)
+                    self._ai_agent.valid_tool_names.add("request_human_takeover")
                 if "log_changes" not in existing_names and "log_changes" not in disabled:
                     from swarm_server.tools import _LOG_CHANGES_TOOL_SCHEMA
                     self._ai_agent.tools = list(self._ai_agent.tools or [])

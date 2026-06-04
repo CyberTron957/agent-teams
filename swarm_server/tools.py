@@ -170,6 +170,36 @@ _ASK_HUMAN_TOOL_SCHEMA = {
     },
 }
 
+_REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "request_human_takeover",
+        "description": (
+            "Hand the live browser to a human when you hit something you can't or "
+            "shouldn't do yourself: a login wall, a CAPTCHA, an SMS/email/2FA "
+            "verification code, a consent prompt, or any manual click-through. The "
+            "browser is moved onto the human's real screen so they act in the SAME "
+            "session (cookies persist), and YOUR run blocks until they finish. When "
+            "they're done you resume exactly where you left off, now past the "
+            "obstacle. This is NOT for questions — use ask_human for those."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "What the human must do and on which site/URL, e.g. "
+                        "'Log in to linkedin.com' or 'Solve the captcha on the "
+                        "checkout page'."
+                    ),
+                },
+            },
+            "required": ["reason"],
+        },
+    },
+}
+
 _LOG_CHANGES_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -553,6 +583,94 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "response": daemon.human_response})
 
 
+def _request_human_takeover_handler(args: dict, **kwargs) -> str:
+    """Move the team browser onto the human's screen, block until they finish, then
+    send it back to the hidden display and resume. Mirrors ask_human's blocking but
+    brackets it with begin_takeover/end_takeover so the handoff is seamless."""
+    reason = args.get("reason", "")
+    task_id_arg = kwargs.get("task_id", "")
+    caller = "unknown"
+    if task_id_arg and task_id_arg.startswith("agent_name:"):
+        caller = task_id_arg.split(":", 1)[1]
+
+    daemon = _daemon_registry.get(caller)
+    if daemon is None:
+        return json.dumps({"error": f"Caller agent '{caller}' not registered."})
+    team_id = (daemon.cfg or {}).get("team_id", "default")
+
+    # Bring the browser onto the human's real screen (same persistent profile).
+    try:
+        from swarm_server.browser_pool import team_browser_manager
+        team_browser_manager.begin_takeover(team_id)
+    except Exception as e:
+        log.error("[%s] [takeover] begin_takeover failed: %s", caller, e)
+
+    prompt = (
+        "🙋 BROWSER TAKEOVER requested by '" + caller + "':\n" + reason +
+        "\n\nThe agent's browser is now visible on your screen. Do the step above "
+        "in that window, then reply 'done' here to hand control back."
+    )
+    log.info("[%s] [takeover] %s", daemon.name, reason)
+
+    from swarm_server.agent import AGENT_STATE_ASKING_HUMAN, AGENT_STATE_BUSY
+
+    qid = add_pending_question(caller, prompt)
+    daemon.human_question_id = qid
+    monitor_db.log_event(caller, "human_waiting",
+                         data={"question": prompt, "question_id": qid, "kind": "takeover"})
+    _broadcast("human_waiting", {
+        "agent_name": caller, "question": prompt, "question_id": qid,
+        "kind": "takeover", "timestamp": time.time(),
+    })
+
+    with daemon._lock:
+        daemon.state = AGENT_STATE_ASKING_HUMAN
+    daemon.human_event.clear()
+    daemon.human_response = None
+    daemon.human_event.wait(timeout=_ASK_HUMAN_WAIT_SECONDS)
+    with daemon._lock:
+        daemon.state = AGENT_STATE_BUSY
+
+    with _pending_lock:
+        q = _pending_human_questions.get(qid)
+        if q and q["status"] == "answered":
+            daemon.human_response = q["response"]
+
+    if not daemon.human_event.is_set():
+        # Human not back yet: leave the browser ON their screen (they still need to
+        # act) and the request pending. When they answer, the inbox endpoint sends
+        # the browser back to the hidden display and re-delivers the response.
+        return json.dumps({
+            "success": True,
+            "status": "waiting_for_human",
+            "message": (
+                "Takeover request saved in the human's inbox (id=" + qid + "). The "
+                "browser is on their screen waiting and will NOT expire — when they "
+                "finish and reply, you resume as a new task, past the obstacle. Stop here."
+            ),
+        })
+
+    # Human finished in-turn — send the browser back to the hidden display, resume.
+    try:
+        from swarm_server.browser_pool import team_browser_manager
+        team_browser_manager.end_takeover(team_id)
+    except Exception as e:
+        log.error("[%s] [takeover] end_takeover failed: %s", caller, e)
+    monitor_db.log_event(caller, "human_responded",
+                         data={"question": prompt, "response": daemon.human_response, "kind": "takeover"})
+    _broadcast("human_responded", {
+        "agent_name": caller, "response": daemon.human_response,
+        "question_id": qid, "kind": "takeover", "timestamp": time.time(),
+    })
+    return json.dumps({
+        "success": True, "status": "completed", "response": daemon.human_response,
+        "message": (
+            "Human finished the manual step; the browser session is now "
+            "authenticated/unblocked. Continue your task from here."
+        ),
+    })
+
+
 def _log_changes_handler(args: dict, **kwargs) -> str:
     import time
     from datetime import datetime
@@ -885,6 +1003,15 @@ def _register_custom_tools():
                 description="Ask a human for clarification.",
             )
             log.info("[ask_human] Registered")
+        if "request_human_takeover" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="request_human_takeover",
+                toolset="custom",
+                schema=_REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA["function"],
+                handler=_request_human_takeover_handler,
+                description="Hand the live browser to a human for a login/CAPTCHA/verification step.",
+            )
+            log.info("[request_human_takeover] Registered")
         if "log_changes" not in (registry.get_tool_to_toolset_map() or {}):
             registry.register(
                 name="log_changes",
