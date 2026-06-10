@@ -300,6 +300,11 @@ class AgentDaemon:
         self._hermes_home.mkdir(parents=True, exist_ok=True)
 
         self._ai_agent = None
+        # Set by config/soul changes to force a CLEAN re-init at the START of the
+        # next turn (on the worker thread) instead of nulling _ai_agent from the
+        # event-loop thread mid-turn — which would crash the in-flight turn at
+        # self._ai_agent.run_conversation and lose a compaction session rotation.
+        self._reinit_requested = False
         # Static half of the ephemeral system prompt; set in _ensure_agent and
         # combined with per-turn live context before each run.
         self._base_ephemeral: Optional[str] = None
@@ -524,11 +529,16 @@ class AgentDaemon:
             log.warning("[%s] Could not write SOUL.md: %s", self.name, e)
 
     def _ensure_agent(self):
-        if self._ai_agent is not None:
+        # A pending re-init request (config/soul change) rebuilds the agent here,
+        # at the start of the turn on the worker thread, rather than the requester
+        # nulling _ai_agent mid-turn from another thread.
+        if self._ai_agent is not None and not self._reinit_requested:
             return
         with _agent_init_lock:
-            if self._ai_agent is not None:
+            if self._ai_agent is not None and not self._reinit_requested:
                 return
+            self._reinit_requested = False
+            self._ai_agent = None
             try:
                 _ensure_hermes_on_path()
                 from run_agent import AIAgent

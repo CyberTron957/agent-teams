@@ -242,12 +242,15 @@ def _browser_keys_handler(args: dict, **kwargs) -> str:
             if not result.get("success"):
                 failed = result
                 break
+        # The line's text is now committed to the page; count it as done
+        # BEFORE the Enter press so a failed Enter does not cause this line
+        # to be retyped (and duplicated) on resume.
+        lines_done = i + 1
         if i < len(lines) - 1:
             result = _ab(task_id, "press", ["Enter"])
             if not result.get("success"):
                 failed = result
                 break
-        lines_done = i + 1
     if failed is None and args.get("press_enter"):
         result = _ab(task_id, "press", ["Enter"])
         if not result.get("success"):
@@ -265,9 +268,10 @@ def _browser_keys_handler(args: dict, **kwargs) -> str:
         out["lines_typed"] = lines_done
         if len(lines) > 1:
             out["resume_hint"] = (
-                f"Lines 1-{lines_done} of {len(lines)} are already in the page — "
-                f"verify, then continue from line {lines_done + 1}; do NOT retype "
-                f"from the start.")
+                f"Lines 1-{lines_done} of {len(lines)} are already typed — do NOT "
+                f"retype them. The line break after line {lines_done} may not have "
+                f"committed, so verify the cursor (or press Enter), then continue "
+                f"from line {lines_done + 1}; do NOT retype from the start.")
     out.update(_breadcrumb(task_id))
     return json.dumps(out, ensure_ascii=False, default=str)
 

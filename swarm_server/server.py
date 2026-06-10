@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from swarm_server.agent import AgentDaemon, AGENT_STATE_ASKING_HUMAN
+from swarm_server.agent import AgentDaemon
 from swarm_server.config import (
     AGENTS,
     CORS_ALLOWED_ORIGINS,
@@ -599,12 +599,50 @@ async def add_agent(request: Request):
     })
 
 
+async def _interrupt_and_drain(daemon, timeout: float = 30.0) -> None:
+    """Interrupt any in-flight turn and WAIT (bounded, off the event loop) for the
+    worker thread to unwind. Used before deleting an agent's workspace so rmtree
+    doesn't pull state.db / the queue DB out from under a live turn (sqlite I/O
+    errors, or a ghost thread recreating files in the just-deleted dir)."""
+    try:
+        agent = daemon._ai_agent
+        if agent is not None and hasattr(agent, "interrupt"):
+            agent.interrupt("Agent is being deleted.")
+        daemon.human_event.set()
+    except Exception as e:
+        log.debug("[Daemon] interrupt before delete failed: %s", e)
+    if daemon._sweep_task and not daemon._sweep_task.done():
+        daemon._sweep_task.cancel()
+        try:
+            await daemon._sweep_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None, daemon._executor.shutdown, True
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        log.warning("[Daemon] '%s' turn still unwinding at delete — proceeding", daemon.name)
+    except Exception as e:
+        log.debug("[Daemon] drain before delete failed: %s", e)
+
+
 @app.delete("/agent/{agent_name}")
 async def remove_agent(agent_name: str):
     cfg = load_agents_config()
     if agent_name not in cfg["agents"]:
         return JSONResponse({"error": "agent not found"}, status_code=404)
 
+    # Stop the in-flight turn and wait for its worker thread to finish BEFORE the
+    # workspace is removed (delete_agent rmtree's it) — see _interrupt_and_drain.
+    daemon = daemons.get(agent_name)
+    if daemon is not None:
+        await _interrupt_and_drain(daemon)
     _stop_and_unregister_daemon(agent_name)
     delete_agent(cfg, agent_name)
     return JSONResponse({"status": "deleted", "agent_name": agent_name})
@@ -615,8 +653,11 @@ def _update_daemon_cfg(agent_name: str, new_cfg: Dict[str, Any]):
     if daemon is not None:
         with daemon._lock:
             daemon.cfg = new_cfg
-            # Force a re-init so model/sampling/soul changes take effect next turn.
-            daemon._ai_agent = None
+            # Request a re-init at the START of the next turn rather than nulling
+            # _ai_agent now: a BUSY agent's worker thread could be mid-turn about to
+            # call self._ai_agent.run_conversation, which a null would crash (and a
+            # rotated compaction session would be lost). The worker re-inits cleanly.
+            daemon._reinit_requested = True
             # Refresh runtime knobs read outside _ensure_agent (heartbeat + sweep).
             daemon._autonomous = bool(new_cfg.get("autonomous", False))
             daemon._sweep_interval = daemon._resolve_sweep_interval(new_cfg)
@@ -663,14 +704,14 @@ async def del_peer(agent_name: str, peer_name: str):
     cfg = load_agents_config()
     if agent_name not in cfg["agents"]:
         return JSONResponse({"error": "agent not found"}, status_code=404)
+    # remove_agent_peer is ALWAYS bidirectional and mutates cfg in place, so it
+    # already dropped peer_name → agent_name. Refresh BOTH running daemons' cfg so
+    # the now-removed link is enforced live. (The old "also remove the reverse
+    # link" branch was dead — the reverse link was already gone here — which left
+    # the peer daemon running with a stale allowed_peers until an unrelated reload.)
     remove_agent_peer(cfg, agent_name, peer_name)
-
-    # Also remove the reverse link if it exists
-    if peer_name in cfg["agents"] and agent_name in cfg["agents"][peer_name].get("allowed_peers", []):
-        remove_agent_peer(cfg, peer_name, agent_name)
-        if peer_name in daemons:
-            _update_daemon_cfg(peer_name, cfg["agents"][peer_name])
-
+    if peer_name in cfg["agents"] and peer_name in daemons:
+        _update_daemon_cfg(peer_name, cfg["agents"][peer_name])
     _update_daemon_cfg(agent_name, cfg["agents"][agent_name])
     return JSONResponse({
         "status": "removed",
@@ -697,7 +738,8 @@ async def update_agent_soul(agent_name: str, request: Request):
         daemon = daemons[agent_name]
         with daemon._lock:
             daemon.cfg = cfg["agents"][agent_name]
-            daemon._ai_agent = None
+            # Re-init at the next turn (not a mid-turn null — see _update_daemon_cfg).
+            daemon._reinit_requested = True
         log.info("[Dynamic Registry] Role soul updated for agent '%s'", agent_name)
 
     from swarm_server.websocket import _broadcast
