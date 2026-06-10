@@ -680,6 +680,23 @@ class AgentDaemon:
                         self._ai_agent.tools.append(_RESUME_AGENT_TOOL_SCHEMA)
                         self._ai_agent.valid_tool_names.add("resume_agent")
 
+                # Credentials registry: fetch/list per-team secrets by site key
+                # with an explicit purpose, instead of secrets riding inline in
+                # workspace.md prompts. Not for supervisors (they do no project
+                # work and never authenticate anywhere).
+                if not self.cfg.get("is_supervisor"):
+                    from swarm_server.credentials import (
+                        GET_CREDENTIAL_TOOL_SCHEMA,
+                        LIST_CREDENTIALS_TOOL_SCHEMA,
+                    )
+                    for _cred_schema in (GET_CREDENTIAL_TOOL_SCHEMA,
+                                         LIST_CREDENTIALS_TOOL_SCHEMA):
+                        _cred_name = _cred_schema["function"]["name"]
+                        if _cred_name not in existing_names and _cred_name not in disabled:
+                            self._ai_agent.tools = list(self._ai_agent.tools or [])
+                            self._ai_agent.tools.append(_cred_schema)
+                            self._ai_agent.valid_tool_names.add(_cred_name)
+
                 # GUI-grade browser tools (keys/hover/drag/click_xy/screenshot/
                 # locate). Only where the Hermes browser toolset itself is live
                 # (browser_navigate present) — they drive the same session — and

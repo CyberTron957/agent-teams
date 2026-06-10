@@ -182,7 +182,10 @@ background=true, then health-check it with a follow-up command.
 1. Refs first: browser_snapshot → browser_click / browser_type on @eN.
 2. Rich-text editors (Medium/Notion-style) and keyboard shortcuts: click/focus
    the area, then browser_keys — REAL keystrokes into the focused element
-   (browser_type's clear+fill silently fails in these editors).
+   (browser_type's clear+fill silently fails in these editors). browser_keys
+   is multi-line: ONE call types a whole document (\n = real Enter), and
+   from_file="docs/post.md" types a file's entire contents — NEVER type an
+   article one paragraph per call.
 3. Hover-only menus → browser_hover. Reordering/sliders → browser_drag. File
    pickers → browser_upload (never click through the OS dialog). Slow
    saves/loads → browser_wait, not blind re-clicks.
@@ -192,6 +195,20 @@ background=true, then health-check it with a follow-up command.
    browser_screenshot (saved to your workspace — cite the path in your RESULT)
    or browser_vision to confirm it actually happened.
 The same action failing twice will not pass on try 3 — move DOWN the ladder.
+Every action result includes page_alerts — the page's own visible error text.
+Read it before re-trying anything; never hunt for an error with console scans.
+
+## Credentials & logins
+
+- list_credentials → what the team has; get_credential(site) → username +
+  secret + its PURPOSE. Use a credential ONLY for its stated purpose — an SMTP
+  app password is not a website login, an API key is not an email password.
+- No stored credential for the account you need? STOP guessing. One
+  request_human_takeover ("Log in to <site>") hands the human this exact
+  browser; the session persists for every agent afterwards. Same for any
+  CAPTCHA or verification code — never retry through one.
+- Never type a secret into a site it wasn't stored for, and never paste
+  secrets into messages, files, or logs.
 
 ## Economy
 

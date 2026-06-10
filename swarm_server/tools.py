@@ -1253,6 +1253,36 @@ def _register_custom_tools():
             )
             log.info("[resume_agent] Registered")
 
+        # Per-team credentials registry — secrets live OUTSIDE the prompt
+        # stream, each under a site key with an explicit purpose, so agents
+        # stop reusing e.g. an SMTP app password as a website login.
+        try:
+            from swarm_server.credentials import (
+                GET_CREDENTIAL_TOOL_SCHEMA, LIST_CREDENTIALS_TOOL_SCHEMA,
+                get_credential_handler, list_credentials_handler,
+            )
+
+            if "get_credential" not in (registry.get_tool_to_toolset_map() or {}):
+                registry.register(
+                    name="get_credential",
+                    toolset="custom",
+                    schema=GET_CREDENTIAL_TOOL_SCHEMA["function"],
+                    handler=get_credential_handler,
+                    description="Fetch one stored team credential by site key.",
+                )
+                log.info("[get_credential] Registered")
+            if "list_credentials" not in (registry.get_tool_to_toolset_map() or {}):
+                registry.register(
+                    name="list_credentials",
+                    toolset="custom",
+                    schema=LIST_CREDENTIALS_TOOL_SCHEMA["function"],
+                    handler=list_credentials_handler,
+                    description="List stored team credentials (no secrets).",
+                )
+                log.info("[list_credentials] Registered")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[Custom Tools] credentials tools skipped: %s", exc)
+
         # GUI-grade browser tools (real keystrokes, hover, drag, coordinate
         # click, screenshot, vision-grounded locate) — the agent-browser CLI
         # commands Hermes doesn't expose. Schemas are appended per-agent in

@@ -413,6 +413,45 @@ async def del_team(team_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Team credentials (per-team secrets registry; agents read via get_credential)
+# ---------------------------------------------------------------------------
+@app.get("/teams/{team_id}/credentials")
+async def get_team_credentials(team_id: str):
+    from swarm_server.credentials import list_credentials_public
+
+    return JSONResponse({"team_id": team_id,
+                         "credentials": list_credentials_public(team_id)})
+
+
+@app.post("/teams/{team_id}/credentials")
+async def post_team_credential(team_id: str, request: Request):
+    from swarm_server.credentials import save_credential
+
+    body = await request.json()
+    try:
+        save_credential(
+            team_id,
+            site=body.get("site", ""),
+            username=body.get("username", ""),
+            secret=body.get("secret", ""),
+            purpose=body.get("purpose", ""),
+            notes=body.get("notes", ""),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"status": "saved", "site": body.get("site", "").strip().lower()})
+
+
+@app.delete("/teams/{team_id}/credentials/{site}")
+async def delete_team_credential(team_id: str, site: str):
+    from swarm_server.credentials import delete_credential
+
+    if delete_credential(team_id, site):
+        return JSONResponse({"status": "deleted", "site": site})
+    return JSONResponse({"error": "credential not found"}, status_code=404)
+
+
+# ---------------------------------------------------------------------------
 # Agent Management Routes
 # ---------------------------------------------------------------------------
 @app.get("/agents")

@@ -37,6 +37,7 @@ import logging
 import re
 import struct
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,14 +78,34 @@ def _task_id_from_kwargs(kwargs: dict) -> str:
     return kwargs.get("task_id", "") or "default"
 
 
+# What the page is SAYING right now — error banners, validation messages,
+# toasts. Surfaced on every action result so agents never burn turns hunting
+# for "what error appeared?" with console scans and vision calls.
+_ALERTS_JS = (
+    "(function(){var sels='[role=\"alert\"],[aria-live=\"assertive\"],"
+    ".error,.alert,.form__error,[class*=\"error-message\"],[id*=\"error-for\"]';"
+    "var seen={},out=[];var els=document.querySelectorAll(sels);"
+    "for(var i=0;i<els.length&&out.length<3;i++){var el=els[i];"
+    "if(!el.offsetParent&&el.getClientRects().length===0)continue;"
+    "var t=(el.innerText||'').replace(/\\s+/g,' ').trim();"
+    "if(t.length>2&&t.length<400&&!seen[t]){seen[t]=1;out.push(t.slice(0,200));}}"
+    "return out;})()"
+)
+
+_HUMAN_GATE_RE = re.compile(
+    r"captcha|verif|wrong (email|password)|incorrect|sign in|log ?in|"
+    r"two.?factor|2fa|code sent|robot", re.IGNORECASE)
+
+
 def _breadcrumb(task_id: str) -> Dict[str, Any]:
-    """Post-action {url, title} so every result shows where the page ended up."""
+    """Post-action {url, title, page_alerts} so every result shows where the
+    page ended up AND what it is telling the user (visible error/alert text)."""
     try:
         from tools.browser_tool import _browser_eval
 
         raw = _browser_eval(
             "JSON.stringify({url: location.href, title: document.title, "
-            "w: innerWidth, h: innerHeight})",
+            "w: innerWidth, h: innerHeight, alerts: " + _ALERTS_JS + "})",
             task_id,
         )
         data = json.loads(raw)
@@ -93,8 +114,19 @@ def _breadcrumb(task_id: str) -> Dict[str, Any]:
             if isinstance(res, str):
                 res = json.loads(res)
             if isinstance(res, dict):
-                return {"url": res.get("url"), "title": res.get("title"),
-                        "viewport": [res.get("w"), res.get("h")]}
+                crumb: Dict[str, Any] = {
+                    "url": res.get("url"), "title": res.get("title"),
+                    "viewport": [res.get("w"), res.get("h")]}
+                alerts = [a for a in (res.get("alerts") or [])
+                          if isinstance(a, str) and a.strip()]
+                if alerts:
+                    crumb["page_alerts"] = alerts
+                    if any(_HUMAN_GATE_RE.search(a) for a in alerts):
+                        crumb["hint"] = (
+                            "This looks like a login wall / CAPTCHA / verification "
+                            "gate. Do NOT brute-force it — request_human_takeover "
+                            "hands this exact browser session to the human.")
+                return crumb
     except Exception as e:  # breadcrumb is best-effort, never fails the action
         log.debug("breadcrumb failed: %s", e)
     return {}
@@ -151,20 +183,91 @@ def _png_dimensions(path: Path) -> Optional[tuple]:
 # Handlers — slice 1 (the missing action rungs)
 # ---------------------------------------------------------------------------
 
+KEYS_FROM_FILE_MAX_BYTES = 200_000
+
+
+def _resolve_keys_file(from_file: str, caller: str) -> "tuple[Optional[Path], str]":
+    """Resolve a from_file path: absolute, else relative to the caller's team
+    project dir, else its workspace. Returns (path, error)."""
+    p = Path(from_file)
+    candidates = [p] if p.is_absolute() else []
+    if not p.is_absolute():
+        try:
+            from swarm_server.config import _get_project_dir
+            from swarm_server.tools import _daemon_registry
+
+            daemon = _daemon_registry.get(caller)
+            team = (getattr(daemon, "cfg", None) or {}).get("team_id")
+            if team:
+                candidates.append(_get_project_dir(team) / p)
+        except Exception:
+            pass
+        ws = _agent_workspace(caller)
+        if ws:
+            candidates.append(ws / p)
+    for cand in candidates:
+        if cand.is_file():
+            return cand, ""
+    return None, (f"file not found: {from_file} (tried: "
+                  f"{[str(c) for c in candidates] or 'absolute path only'})")
+
+
 def _browser_keys_handler(args: dict, **kwargs) -> str:
     text = args.get("text")
+    from_file = (args.get("from_file") or "").strip()
+    if from_file:
+        path, err = _resolve_keys_file(from_file, _caller_from_kwargs(kwargs))
+        if path is None:
+            return json.dumps({"success": False, "error": err})
+        if path.stat().st_size > KEYS_FROM_FILE_MAX_BYTES:
+            return json.dumps({"success": False,
+                               "error": f"{path} exceeds {KEYS_FROM_FILE_MAX_BYTES} bytes."})
+        text = path.read_text(encoding="utf-8", errors="replace")
     if not isinstance(text, str) or text == "":
-        return json.dumps({"success": False, "error": "'text' is required."})
+        return json.dumps({"success": False,
+                           "error": "'text' (or a non-empty 'from_file') is required."})
+
     mode = "inserttext" if args.get("paste") else "type"
     task_id = _task_id_from_kwargs(kwargs)
-    result = _ab(task_id, "keyboard", [mode, text])
-    if result.get("success") and args.get("press_enter"):
+
+    # Multi-line text is typed line-by-line with a REAL Enter between lines —
+    # one tool call types a whole document (rich editors treat Enter as the
+    # paragraph break; embedding \n in a type event does not).
+    lines = text.split("\n")
+    failed: Optional[Dict[str, Any]] = None
+    lines_done = 0
+    for i, line in enumerate(lines):
+        if line:
+            result = _ab(task_id, "keyboard", [mode, line])
+            if not result.get("success"):
+                failed = result
+                break
+        if i < len(lines) - 1:
+            result = _ab(task_id, "press", ["Enter"])
+            if not result.get("success"):
+                failed = result
+                break
+        lines_done = i + 1
+    if failed is None and args.get("press_enter"):
         result = _ab(task_id, "press", ["Enter"])
-    out = {"success": bool(result.get("success")),
-           "command": f"keyboard {mode} <{len(text)} chars>"
-                      + (" + Enter" if args.get("press_enter") else "")}
-    if not result.get("success"):
-        out["error"] = result.get("error", "unknown agent-browser error")
+        if not result.get("success"):
+            failed = result
+
+    out: Dict[str, Any] = {
+        "success": failed is None,
+        "command": f"keyboard {mode} <{len(text)} chars, {len(lines)} line(s)>"
+                   + (" + Enter" if args.get("press_enter") else ""),
+    }
+    if from_file:
+        out["from_file"] = str(path)
+    if failed is not None:
+        out["error"] = failed.get("error", "unknown agent-browser error")
+        out["lines_typed"] = lines_done
+        if len(lines) > 1:
+            out["resume_hint"] = (
+                f"Lines 1-{lines_done} of {len(lines)} are already in the page — "
+                f"verify, then continue from line {lines_done + 1}; do NOT retype "
+                f"from the start.")
     out.update(_breadcrumb(task_id))
     return json.dumps(out, ensure_ascii=False, default=str)
 
@@ -318,10 +421,14 @@ _LOCATE_PROMPT = (
 
 def _resolve_vision_endpoint(caller: str) -> Dict[str, str]:
     """{base_url, api_key, model} for grounding calls — the agent's effective
-    backend (same proxy its own turns use) + the configured vision model."""
-    from swarm_server.config import LITELLM_API_BASE, LLM_API_KEY, get_vision_model
+    backend (same proxy its own turns use). The model is the agent's MAIN model
+    when it can read images (probed once, cached), else the configured vision
+    model."""
+    from swarm_server.config import (
+        LITELLM_API_BASE, LLM_API_KEY, get_vision_model, resolve_screenshot_model,
+    )
 
-    base_url, api_key = "", ""
+    base_url, api_key, main_model = "", "", ""
     try:
         from swarm_server.model_config import resolve_model
         from swarm_server.tools import _daemon_registry
@@ -330,22 +437,27 @@ def _resolve_vision_endpoint(caller: str) -> Dict[str, str]:
         eff = resolve_model(getattr(daemon, "cfg", None) or {})
         base_url = (eff.get("base_url") or "").strip()
         api_key = (eff.get("api_key") or "").strip()
+        main_model = (eff.get("model") or "").strip()
     except Exception as e:
         log.debug("vision endpoint resolve failed (%s); using proxy default", e)
-    return {
-        "base_url": base_url or LITELLM_API_BASE,
-        "api_key": api_key or LLM_API_KEY,
-        "model": get_vision_model(),
-    }
+    base_url = base_url or LITELLM_API_BASE
+    api_key = api_key or LLM_API_KEY
+    model = (resolve_screenshot_model(main_model, base_url, api_key)
+             if main_model else get_vision_model())
+    return {"base_url": base_url, "api_key": api_key, "model": model}
 
 
 def _call_vision_model(endpoint: Dict[str, str], prompt: str, png_bytes: bytes) -> str:
-    """One OpenAI-compatible chat call with an inline image; returns raw text."""
+    """One OpenAI-compatible chat call with an inline image; returns raw text.
+
+    max_completion_tokens (not max_tokens — reasoning models burn a tight
+    budget thinking and return nothing) sized for reasoning + the JSON answer;
+    no temperature (the o-series/gpt-5 family rejects non-default values).
+    Falls back to max_tokens for backends that reject max_completion_tokens.
+    """
     url = endpoint["base_url"].rstrip("/") + "/chat/completions"
-    payload = {
+    base_payload = {
         "model": endpoint["model"],
-        "max_tokens": 300,
-        "temperature": 0,
         "messages": [{
             "role": "user",
             "content": [
@@ -356,15 +468,27 @@ def _call_vision_model(endpoint: Dict[str, str], prompt: str, png_bytes: bytes) 
             ],
         }],
     }
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {endpoint['api_key']}"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=VISION_LOCATE_TIMEOUT_SECONDS) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    return (body.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+
+    def attempt(limit_key: str) -> str:
+        payload = dict(base_payload)
+        payload[limit_key] = 800
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {endpoint['api_key']}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=VISION_LOCATE_TIMEOUT_SECONDS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return (body.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+
+    try:
+        return attempt("max_completion_tokens")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        if e.code == 400 and "max_completion_tokens" in detail:
+            return attempt("max_tokens")
+        raise RuntimeError(f"HTTP {e.code}: {detail[:200]}") from None
 
 
 def _parse_locate_reply(reply: str) -> Optional[Dict[str, Any]]:
@@ -469,15 +593,25 @@ BROWSER_KEYS_TOOL_SCHEMA = _schema(
     "THE tool for rich-text editors (Medium/Notion/LinkedIn composers, "
     "contenteditable), canvas apps, and any field where browser_type's "
     "clear-and-fill fails or types into the wrong place. First click/focus the "
-    "target area, then call this. Set paste=true to insert large text in one "
-    "event (no per-key events) — some editors require real typing, so default "
-    "is real keys.",
-    {"text": {"type": "string", "description": "Text to type. \\n produces Enter keypresses."},
+    "target area, then call this. Handles MULTI-LINE text: each \\n becomes a "
+    "real Enter keypress, so ONE call types a whole document — never type an "
+    "article one paragraph per call. To type a file's entire contents without "
+    "pasting them into this call, pass from_file instead of text. Set "
+    "paste=true to insert each line in one event (no per-key events) — some "
+    "editors require real typing, so default is real keys.",
+    {"text": {"type": "string",
+              "description": "Text to type. Each \\n is pressed as a real Enter "
+                             "(paragraph break) — multi-line is fine and preferred."},
+     "from_file": {"type": "string",
+                   "description": "Type the contents of this file instead of 'text' "
+                                  "(absolute path, or relative to the project dir). "
+                                  "The whole document goes in ONE call."},
      "paste": {"type": "boolean", "default": False,
-               "description": "Insert in one event instead of per-key typing (faster for long text)."},
+               "description": "Insert each line in one event instead of per-key typing "
+                              "(faster for long text)."},
      "press_enter": {"type": "boolean", "default": False,
-                     "description": "Press Enter after typing (submit)."}},
-    ["text"],
+                     "description": "Press Enter once more after everything (submit)."}},
+    [],
 )
 
 BROWSER_HOVER_TOOL_SCHEMA = _schema(

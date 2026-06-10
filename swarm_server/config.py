@@ -669,15 +669,21 @@ def write_agent_hermes_config(
     # The summarizer shares the main window; tell its feasibility check.
     aux_section["compression"]["context_length"] = AGENT_CONTEXT_WINDOW
     # Vision (browser_vision screenshot reading) is special: it MUST use a
-    # multimodal model even when the main model is text-only. We pin it to
-    # VISION_MODEL on the same proxy. Supplying both base_url AND api_key forces
-    # the deterministic "custom endpoint" branch in
+    # multimodal model. Prefer the agent's MAIN model when a one-time probe
+    # shows it actually reads images (one model, no extra hop); otherwise pin
+    # the dedicated vision model on the same proxy. Supplying both base_url AND
+    # api_key forces the deterministic "custom endpoint" branch in
     # auxiliary_client.resolve_vision_provider_client, bypassing the capability
     # heuristic that would otherwise drop to unauthenticated aggregators (Gemini/
     # OpenRouter) and fail. Without this entry the "vision" task resolves to
     # provider="auto" and browser_vision raises "No LLM provider configured".
+    # The probe needs an OpenAI-compatible endpoint; native providers (no
+    # base_url) skip it and keep the dedicated vision model.
     vision_cfg = dict(aux_endpoint)
-    vision_cfg["model"] = get_vision_model()
+    vision_cfg["model"] = (
+        resolve_screenshot_model(model, eff_base, eff_key)
+        if eff_base else get_vision_model()
+    )
     aux_section["vision"] = {**aux_section.get("vision", {}), **vision_cfg}
     existing["auxiliary"] = aux_section
 
@@ -1246,6 +1252,123 @@ def get_vision_model() -> str:
     except Exception:
         pass
     return VISION_MODEL
+
+
+# Vision-capability probe. Proxy metadata can't be trusted here (LiteLLM's
+# /model/info carries no supports_vision for generic aliases like
+# "litellm-model"), and a gateway may silently ACCEPT image parts a text-only
+# model never sees — so capability is established empirically: send a solid
+# red PNG and require the model to name the color. Verdicts are cached for
+# the process lifetime (capability doesn't change under a fixed model name;
+# a restart re-probes after a proxy remap).
+_VISION_PROBE_CACHE: Dict[tuple, bool] = {}
+_VISION_PROBE_LOCK = threading.Lock()
+VISION_PROBE_TIMEOUT_SECONDS = float(os.environ.get("SWARM_VISION_PROBE_TIMEOUT", "15"))
+
+
+def _probe_png() -> bytes:
+    """64x64 solid-red RGB PNG, stdlib only."""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    w = h = 64
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _vision_probe(model: str, base_url: str, api_key: str) -> bool:
+    """One uncached probe call. True only if the model demonstrably SAW the image.
+
+    Uses max_completion_tokens (a tight max_tokens starves reasoning models —
+    they burn the whole budget thinking and return nothing) and no temperature
+    (the o-series/gpt-5 family rejects non-default values). Falls back to
+    max_tokens for older backends that reject max_completion_tokens.
+    """
+    import base64
+    import urllib.error
+    import urllib.request
+
+    url = base_url.rstrip("/") + "/chat/completions"
+    base_payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text",
+                 "text": "What is the dominant color of this image? Reply with one word."},
+                {"type": "image_url", "image_url": {
+                    "url": "data:image/png;base64,"
+                           + base64.b64encode(_probe_png()).decode("ascii")}},
+            ],
+        }],
+    }
+
+    def attempt(limit_key: str) -> str:
+        payload = dict(base_payload)
+        payload[limit_key] = 200
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=VISION_PROBE_TIMEOUT_SECONDS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return ((body.get("choices") or [{}])[0]
+                .get("message", {}).get("content", "") or "")
+
+    try:
+        reply = attempt("max_completion_tokens")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        if e.code == 400 and "max_completion_tokens" in detail:
+            reply = attempt("max_tokens")
+        else:
+            raise RuntimeError(f"HTTP {e.code}: {detail[:200]}") from None
+    return "red" in reply.lower()
+
+
+def model_supports_vision(model: str, base_url: str, api_key: str) -> bool:
+    """Whether `model` at `base_url` accepts AND understands image input.
+
+    Probes once per (base_url, model) and caches the verdict for the process
+    lifetime. Any failure (HTTP 4xx for image parts, timeout, proxy down,
+    blind-but-200 answer) verdicts False — the safe direction, since callers
+    fall back to the dedicated vision model.
+    """
+    model = (model or "").strip()
+    base_url = (base_url or "").strip()
+    if not model or not base_url:
+        return False
+    key = (base_url, model)
+    with _VISION_PROBE_LOCK:
+        if key in _VISION_PROBE_CACHE:
+            return _VISION_PROBE_CACHE[key]
+    try:
+        verdict = _vision_probe(model, base_url, api_key)
+    except Exception as e:
+        log.info("vision probe failed for %s @ %s (%s) — treating as text-only",
+                 model, base_url, e)
+        verdict = False
+    with _VISION_PROBE_LOCK:
+        _VISION_PROBE_CACHE[key] = verdict
+    log.info("vision capability: %s @ %s -> %s", model, base_url, verdict)
+    return verdict
+
+
+def resolve_screenshot_model(model: str, base_url: str, api_key: str) -> str:
+    """Model to use for screenshot reading / GUI grounding: the agent's MAIN
+    model when it can read images (one model, no extra hop), else the
+    configured vision model."""
+    if model_supports_vision(model, base_url, api_key):
+        return model
+    return get_vision_model()
 
 
 def list_agent_crons(cfg: Dict[str, Any], name: str) -> List[Dict[str, Any]]:

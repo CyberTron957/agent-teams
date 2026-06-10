@@ -328,5 +328,262 @@ def test_settings_defaults_include_vision_model():
     assert "vision_model" in _GLOBAL_SETTINGS_DEFAULTS
 
 
+# ---------------------------------------------------------------------------
+# 7. Vision-capability probe — main model handles screenshots when it can
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def clean_probe_cache():
+    import swarm_server.config as config
+
+    config._VISION_PROBE_CACHE.clear()
+    yield config
+    config._VISION_PROBE_CACHE.clear()
+
+
+def test_probe_png_is_valid_64x64():
+    import swarm_server.config as config
+
+    assert _png_dimensions_from_bytes(config._probe_png()) == (64, 64)
+
+
+def _png_dimensions_from_bytes(data: bytes):
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        f.write(data)
+        f.flush()
+        return _png_dimensions(Path(f.name))
+
+
+def test_supports_vision_true_when_model_sees_red(monkeypatch, clean_probe_cache):
+    config = clean_probe_cache
+    monkeypatch.setattr(config, "_vision_probe", lambda m, b, k: True)
+    assert config.model_supports_vision("main-vlm", "http://x:4000/v1", "k") is True
+    assert config.resolve_screenshot_model("main-vlm", "http://x:4000/v1", "k") == "main-vlm"
+
+
+def test_supports_vision_false_falls_back_to_vision_model(monkeypatch, clean_probe_cache):
+    config = clean_probe_cache
+
+    def boom(m, b, k):
+        raise RuntimeError("400: image input not supported")
+
+    monkeypatch.setattr(config, "_vision_probe", boom)
+    assert config.model_supports_vision("text-only", "http://x:4000/v1", "k") is False
+    assert (config.resolve_screenshot_model("text-only", "http://x:4000/v1", "k")
+            == config.get_vision_model())
+
+
+def test_supports_vision_probe_cached_per_endpoint_model(monkeypatch, clean_probe_cache):
+    config = clean_probe_cache
+    calls = []
+    monkeypatch.setattr(config, "_vision_probe",
+                        lambda m, b, k: calls.append((b, m)) or True)
+    for _ in range(3):
+        config.model_supports_vision("m1", "http://x:4000/v1", "k")
+    config.model_supports_vision("m2", "http://x:4000/v1", "k")  # distinct model re-probes
+    assert calls == [("http://x:4000/v1", "m1"), ("http://x:4000/v1", "m2")]
+
+
+def test_supports_vision_requires_model_and_base(clean_probe_cache):
+    config = clean_probe_cache
+    assert config.model_supports_vision("", "http://x:4000/v1", "k") is False
+    assert config.model_supports_vision("m", "", "k") is False
+
+
+def test_hermes_config_vision_uses_main_model_when_capable(tmp_path, monkeypatch, clean_probe_cache):
+    import yaml
+
+    config = clean_probe_cache
+    monkeypatch.setattr(config, "model_supports_vision", lambda m, b, k: True)
+    config.write_agent_hermes_config(tmp_path / "h1", model="main-vlm",
+                                     base_url="http://x:4000/v1", api_key="k")
+    cfg = yaml.safe_load((tmp_path / "h1" / "config.yaml").read_text())
+    assert cfg["auxiliary"]["vision"]["model"] == "main-vlm"
+
+    monkeypatch.setattr(config, "model_supports_vision", lambda m, b, k: False)
+    config.write_agent_hermes_config(tmp_path / "h2", model="text-only",
+                                     base_url="http://x:4000/v1", api_key="k")
+    cfg = yaml.safe_load((tmp_path / "h2" / "config.yaml").read_text())
+    assert cfg["auxiliary"]["vision"]["model"] == config.get_vision_model()
+
+
+# ---------------------------------------------------------------------------
+# 8. Multi-line / from_file typing — one call types a whole document
+# ---------------------------------------------------------------------------
+
+def test_keys_multiline_types_lines_with_real_enters(ab_recorder):
+    out = json.loads(_browser_keys_handler({"text": "Title\nBody one\n\nBody two"}, **KW))
+    assert out["success"] is True
+    assert ab_recorder == [
+        ("keyboard", ["type", "Title"]), ("press", ["Enter"]),
+        ("keyboard", ["type", "Body one"]), ("press", ["Enter"]),
+        ("press", ["Enter"]),  # empty line = paragraph break, no empty type call
+        ("keyboard", ["type", "Body two"]),
+    ]
+    assert "4 line(s)" in out["command"]
+
+
+def test_keys_multiline_final_press_enter(ab_recorder):
+    json.loads(_browser_keys_handler({"text": "a\nb", "press_enter": True}, **KW))
+    assert ab_recorder == [
+        ("keyboard", ["type", "a"]), ("press", ["Enter"]),
+        ("keyboard", ["type", "b"]), ("press", ["Enter"]),
+    ]
+
+
+def test_keys_from_file_types_document(tmp_path, ab_recorder):
+    doc = tmp_path / "post.md"
+    doc.write_text("# Title\n\nFirst para")
+    out = json.loads(_browser_keys_handler({"from_file": str(doc)}, **KW))
+    assert out["success"] is True
+    assert out["from_file"] == str(doc)
+    assert ab_recorder == [
+        ("keyboard", ["type", "# Title"]), ("press", ["Enter"]),
+        ("press", ["Enter"]),
+        ("keyboard", ["type", "First para"]),
+    ]
+
+
+def test_keys_from_file_missing(ab_recorder):
+    out = json.loads(_browser_keys_handler({"from_file": "/nope/missing.md"}, **KW))
+    assert out["success"] is False and "not found" in out["error"]
+    assert ab_recorder == []
+
+
+def test_keys_midway_failure_reports_resume_point(monkeypatch):
+    calls = []
+
+    def flaky_ab(task_id, command, args=None, timeout=None):
+        calls.append((command, list(args or [])))
+        if len(calls) >= 5:  # fail on the 5th dispatch (line 3's type)
+            return {"success": False, "error": "session crashed"}
+        return {"success": True}
+
+    monkeypatch.setattr(gui, "_ab", flaky_ab)
+    monkeypatch.setattr(gui, "_breadcrumb", lambda task_id: {})
+    out = json.loads(_browser_keys_handler({"text": "l1\nl2\nl3\nl4"}, **KW))
+    assert out["success"] is False
+    assert out["lines_typed"] == 2
+    assert "continue from line 3" in out["resume_hint"]
+
+
+# ---------------------------------------------------------------------------
+# 9. page_alerts — the page's own error text rides on every breadcrumb
+# ---------------------------------------------------------------------------
+
+def _stub_eval(monkeypatch, result_obj):
+    mod = types.ModuleType("tools.browser_tool")
+    mod._browser_eval = lambda expr, task_id: json.dumps(
+        {"success": True, "result": json.dumps(result_obj)})
+    mod._run_browser_command = lambda *a, **k: {"success": True}
+    mod._last_session_key = lambda t: t
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.browser_tool", mod)
+
+
+def test_breadcrumb_surfaces_page_alerts(monkeypatch):
+    _stub_eval(monkeypatch, {"url": "https://a.test", "title": "T", "w": 800, "h": 600,
+                             "alerts": ["Title is required", ""]})
+    crumb = gui._breadcrumb("agent_name:tester")
+    assert crumb["page_alerts"] == ["Title is required"]
+    assert "hint" not in crumb  # not a login/captcha gate
+
+
+def test_breadcrumb_login_gate_hints_takeover(monkeypatch):
+    _stub_eval(monkeypatch, {"url": "https://a.test", "title": "T", "w": 800, "h": 600,
+                             "alerts": ["Wrong email or password."]})
+    crumb = gui._breadcrumb("agent_name:tester")
+    assert "request_human_takeover" in crumb["hint"]
+
+
+def test_breadcrumb_no_alerts_key_when_clean(monkeypatch):
+    _stub_eval(monkeypatch, {"url": "https://a.test", "title": "T", "w": 800, "h": 600,
+                             "alerts": []})
+    crumb = gui._breadcrumb("agent_name:tester")
+    assert "page_alerts" not in crumb and "hint" not in crumb
+
+
+# ---------------------------------------------------------------------------
+# 10. Credentials registry — purpose-scoped secrets outside the prompt stream
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def creds_env(tmp_path, monkeypatch):
+    import swarm_server.credentials as creds
+
+    monkeypatch.setattr(creds, "WORKSPACE_ROOT", tmp_path)
+    daemon = types.SimpleNamespace(cfg={"team_id": "teamx"})
+    import swarm_server.tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_daemon_registry", {"tester": daemon})
+    return creds
+
+
+def test_credentials_roundtrip_and_permissions(creds_env, tmp_path):
+    creds = creds_env
+    creds.save_credential("teamx", "Gmail-SMTP", "u@x.com", "s3cret",
+                          "SMTP sending only", notes="port 587")
+    entry = creds.get_credential("teamx", "gmail-smtp")  # key normalized
+    assert entry["secret"] == "s3cret"
+    pub = creds.list_credentials_public("teamx")
+    assert pub["gmail-smtp"]["purpose"] == "SMTP sending only"
+    assert "secret" not in pub["gmail-smtp"]
+    import os
+    assert (os.stat(tmp_path / "teamx" / "credentials.json").st_mode & 0o777) == 0o600
+    assert creds.delete_credential("teamx", "gmail-smtp") is True
+    assert creds.get_credential("teamx", "gmail-smtp") is None
+
+
+def test_credentials_require_purpose(creds_env):
+    with pytest.raises(ValueError):
+        creds_env.save_credential("teamx", "site", "u", "s", "")
+
+
+def test_get_credential_handler_scopes_to_caller_team(creds_env):
+    creds = creds_env
+    creds.save_credential("teamx", "linkedin", "u@x.com", "pw", "LinkedIn login")
+    creds.save_credential("teamy", "other", "o", "o", "other team's secret")
+    out = json.loads(creds.get_credential_handler({"site": "linkedin"}, **KW))
+    assert out["success"] is True and out["secret"] == "pw"
+    out = json.loads(creds.get_credential_handler({"site": "other"}, **KW))
+    assert out["success"] is False                      # other team's cred invisible
+    assert out["available_sites"] == ["linkedin"]
+    assert "request_human_takeover" in out["hint"]
+
+
+def test_list_credentials_handler_never_leaks_secrets(creds_env):
+    creds = creds_env
+    creds.save_credential("teamx", "gmail-smtp", "u@x.com", "supersecret", "SMTP only")
+    raw = creds.list_credentials_handler({}, **KW)
+    assert "supersecret" not in raw
+    out = json.loads(raw)
+    assert out["credentials"]["gmail-smtp"]["purpose"] == "SMTP only"
+
+
+def test_locate_endpoint_prefers_capable_main_model(monkeypatch, clean_probe_cache):
+    config = clean_probe_cache
+    monkeypatch.setattr(config, "_vision_probe", lambda m, b, k: True)
+
+    import swarm_server.model_config as model_config
+    import swarm_server.tools as tools_mod
+
+    daemon = types.SimpleNamespace(cfg={"model": "main-vlm"})
+    monkeypatch.setattr(tools_mod, "_daemon_registry", {"tester": daemon})
+    monkeypatch.setattr(model_config, "resolve_model",
+                        lambda cfg=None: {"model": "main-vlm",
+                                          "base_url": "http://x:4000/v1",
+                                          "api_key": "k"})
+    ep = gui._resolve_vision_endpoint("tester")
+    assert ep["model"] == "main-vlm"
+
+    config._VISION_PROBE_CACHE.clear()
+    monkeypatch.setattr(config, "_vision_probe",
+                        lambda m, b, k: (_ for _ in ()).throw(RuntimeError("no images")))
+    ep = gui._resolve_vision_endpoint("tester")
+    assert ep["model"] == config.get_vision_model()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
