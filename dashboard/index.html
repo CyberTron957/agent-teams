@@ -65,6 +65,21 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 #network-svg g[role="button"]:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 3px; }
 button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .tnum, .stat-badge, .queue-badge, .queue-bar-count, .msg-time, .ev-time, .cfg-telemetry, #net-info, .topbar-stats { font-variant-numeric: tabular-nums; }
+/* Architect: a distinct centered capsule, set apart from the square tool buttons. */
+#architect-btn {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 7px 18px; border-radius: 999px; cursor: pointer;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+    color: var(--text); background: linear-gradient(180deg, var(--bg-hover), var(--bg-card));
+    border: 1px solid var(--tool);
+    box-shadow: 0 0 0 1px rgba(69,214,232,0.12), 0 6px 20px -10px rgba(69,214,232,0.6);
+    transition: box-shadow 0.2s, transform 0.05s, background 0.2s; white-space: nowrap;
+}
+#architect-btn:hover { background: linear-gradient(180deg, var(--bg-card), var(--bg-hover)); box-shadow: 0 0 0 1px rgba(69,214,232,0.25), 0 8px 26px -8px rgba(69,214,232,0.85); }
+#architect-btn:active { transform: translate(-50%, -50%) scale(0.97); }
+#architect-btn .ic { color: var(--tool); }
+@media (max-width: 820px) { #architect-btn { padding: 6px 13px; font-size: 11px; } }
 .topbar {
     background: rgba(0,0,0,0.78);
     -webkit-backdrop-filter: blur(14px);
@@ -190,6 +205,10 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .md pre.md-pre code { font-family: var(--font-mono); font-size: 11px; white-space: pre; background: none; border: none; padding: 0; color: var(--text); }
 .md blockquote { margin: 6px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--border-strong); color: var(--text-muted); }
 .md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.md table.md-table { border-collapse: collapse; margin: 8px 0; font-size: 0.95em; display: block; overflow-x: auto; max-width: 100%; }
+.md table.md-table th, .md table.md-table td { border: 1px solid var(--border-strong); padding: 5px 10px; text-align: left; vertical-align: top; }
+.md table.md-table th { background: var(--bg-input); font-weight: 600; color: var(--text); }
+.md table.md-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
 .exec-step.reasoning .md, .exec-step.answer .md { font-size: 12.5px; }
 /* Compaction checkpoint divider in the History transcript */
 .cc-checkpoint { margin: 14px 0; border: 1px solid rgba(245,181,68,0.45); border-radius: var(--r-md); overflow: hidden; background: rgba(245,181,68,0.04); }
@@ -271,6 +290,36 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .inbox-item-response { font-size: 11px; margin-top: 7px; padding: 8px; background: rgba(62,207,142,0.08); border-radius: var(--r-sm); color: var(--text); word-break: break-word; }
 .inbox-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 140; display: none; }
 .inbox-overlay.open { display: block; animation: fadeIn 0.2s ease; }
+
+/* ===== ARCHITECT (master) PANEL ===== */
+.master-panel { position: fixed; top: 0; right: -560px; width: 540px; max-width: 96vw; bottom: 0; background: var(--bg-raised); border-left: 1px solid var(--border-strong); z-index: 150; transition: right 0.32s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; box-shadow: -30px 0 80px -40px rgba(0,0,0,0.9); }
+.master-panel.open { right: 0; }
+.master-model-tag { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); }
+.master-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.m-msg { border-radius: 10px; padding: 10px 13px; font-size: 13px; line-height: 1.6; word-break: break-word; max-width: 90%; }
+.m-msg.user { align-self: flex-end; white-space: pre-wrap; background: var(--accent-soft); border: 1px solid var(--border-strong); }
+.m-msg.assistant { align-self: flex-start; background: var(--bg-card); border: 1px solid var(--border); }
+.m-msg.system { align-self: center; white-space: pre-wrap; background: transparent; color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; border: none; padding: 2px; }
+.m-msg .m-role { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 5px; }
+/* markdown inside an assistant bubble */
+.m-msg .md > :first-child { margin-top: 0; }
+.m-msg .md > :last-child { margin-bottom: 0; }
+.m-msg .md p { margin: 0 0 8px; }
+.m-msg .md ul, .m-msg .md ol { margin: 4px 0 8px; padding-left: 20px; }
+.m-msg .md li { margin: 2px 0; }
+.m-msg .md h1, .m-msg .md h2, .m-msg .md h3, .m-msg .md h4 { margin: 12px 0 6px; font-size: 13px; font-weight: 700; }
+.m-msg .md h1 { font-size: 15px; }
+.m-msg .md h2 { font-size: 14px; }
+.m-msg .md code.md-code { background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-family: var(--font-mono); font-size: 11.5px; }
+.m-msg .md pre.md-pre { background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
+.m-msg .md pre.md-pre code { font-family: var(--font-mono); font-size: 11.5px; white-space: pre; }
+.m-msg .md a { color: var(--tool); }
+.master-exec-line { padding: 0 14px; min-height: 0; font-size: 11px; color: var(--tool); font-family: var(--font-mono); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; transition: min-height 0.2s; }
+.master-exec-line.active { min-height: 18px; padding: 4px 14px; }
+.master-input-row { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); align-items: flex-end; }
+.master-input-row textarea { flex: 1; margin: 0; min-height: 44px; max-height: 168px; height: 44px; resize: none; line-height: 1.5; padding: 11px 12px; box-sizing: border-box; }
+.master-input-row #master-send-btn { width: auto; height: 44px; padding: 0 22px; flex: 0 0 auto; align-self: flex-end; }
+.master-panel.busy #master-send-btn { opacity: 0.5; pointer-events: none; }
 
 /* ===== VIEW TABS (History / Live) ===== */
 .view-tabs { display: flex; gap: 6px; padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--bg-raised); flex-shrink: 0; }
@@ -392,6 +441,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         <span>Events <span class="stat-badge" id="stat-events">0</span></span>
         <span id="stat-cost-wrap" style="display:none;cursor:help" title="">Cost 24h <span class="stat-badge" id="stat-cost">—</span></span>
     </div>
+    <button id="architect-btn" onclick="toggleMaster()" title="Chat with the Architect — it designs and builds agent teams for you"><span data-icon="compass" data-icon-size="14"></span> Architect</button>
     <div style="display:flex;align-items:center;gap:12px">
         <button id="inbox-btn" class="btn btn-sm btn-secondary" onclick="toggleInbox()" style="position:relative;">
             <span data-icon="mail" data-icon-size="13"></span> Inbox
@@ -472,7 +522,6 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             <input class="control-input" id="ctrl-payload" placeholder="Message the selected agent…" aria-label="Message the selected agent" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();sendTask();}">
             <button class="btn" style="width:auto;white-space:nowrap" onclick="sendTask()">Send</button>
         </div>
-        <div style="margin-top:5px;display:flex;gap:5px"><button class="btn btn-secondary" style="flex:1" onclick="refreshData()">Refresh</button><button class="btn btn-secondary" style="flex:1" onclick="clearLog()">Clear</button></div>
     </div>
 </div>
 
@@ -586,6 +635,8 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             <div style="font-size:11px;color:var(--text-muted);line-height:1.5">A cheap out-of-band model reads each agent's activity and writes a short rolling status — monitor a big team by digest instead of reading every chat.</div>
             <div class="control-group" style="margin-top:12px"><label class="control-label" for="setup-vision-model">Vision model (screenshots &amp; GUI grounding)</label><input class="control-input" id="setup-vision-model" list="setup-model-list" placeholder=""></div>
             <div style="font-size:11px;color:var(--text-muted);line-height:1.5">Fallback multimodal model for reading browser screenshots (<code>browser_vision</code>) and finding on-screen elements by description (<code>browser_locate</code> → coordinates for <code>browser_click_xy</code>). Used only when an agent's main model can't read images (checked automatically with a one-time probe); vision-capable main models handle their own screenshots. Must accept image input; served through the same endpoint as the default model. Applies to all agents on save.</div>
+            <div class="control-group" style="margin-top:12px"><label class="control-label" for="setup-master-model"><span data-icon="compass" data-icon-size="11"></span> Architect model (team builder)</label><input class="control-input" id="setup-master-model" list="setup-model-list" placeholder="(defaults to the model above)"></div>
+            <div style="font-size:11px;color:var(--text-muted);line-height:1.5">The model that powers the <b>Architect</b> chat (designs and builds teams). A strong general model is best here. Blank = use the default model above.</div>
             <div id="setup-error" style="color:var(--danger);font-size:11px;margin-top:8px"></div>
         </div>
         <div class="modal-footer">
@@ -617,6 +668,27 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     </div>
     <div class="inbox-body" id="inbox-body">
         <div class="empty-state"><div class="empty-state-icon"><span data-icon="mail" data-icon-size="26"></span></div><div>No questions yet</div></div>
+    </div>
+</div>
+
+<!-- Architect (master team-builder) Panel -->
+<div class="inbox-overlay" id="master-overlay" onclick="toggleMaster()"></div>
+<div class="master-panel" id="master-panel" role="complementary" aria-label="Architect chat">
+    <div class="inbox-header">
+        <h3><span data-icon="compass" data-icon-size="14"></span> Architect</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+            <span id="master-model-tag" class="master-model-tag"></span>
+            <button class="btn btn-sm btn-secondary" onclick="resetMaster()" title="Start a fresh conversation">New chat</button>
+            <button class="btn btn-sm btn-secondary" onclick="toggleMaster()">Close</button>
+        </div>
+    </div>
+    <div class="master-body" id="master-body">
+        <div class="empty-state"><div class="empty-state-icon"><span data-icon="compass" data-icon-size="26"></span></div><div>Tell the Architect what you want to build.</div></div>
+    </div>
+    <div id="master-exec-line" class="master-exec-line"></div>
+    <div class="master-input-row">
+        <textarea id="master-input" class="control-textarea" rows="1" placeholder="Describe your goal, or ask the Architect to build / change a team…" aria-label="Message the Architect" oninput="autoGrowMaster(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMasterMsg();}"></textarea>
+        <button class="btn" id="master-send-btn" onclick="sendMasterMsg()">Send</button>
     </div>
 </div>
 
@@ -876,6 +948,27 @@ function handleWS(msg) {
         case 'settings_updated':
             logEvent('system', `Monitoring settings updated${payload.summary_model ? ' (digest model: ' + payload.summary_model + ')' : ''}`);
             break;
+        case 'master_state':
+            setMasterBusy(!!payload.busy);
+            if (payload.reset) { masterHistoryLoaded = false; if (document.getElementById('master-panel').classList.contains('open')) loadMasterHistory(); }
+            break;
+        case 'master_message':
+            appendMasterMessage('assistant', payload.content || '');
+            setMasterBusy(false);
+            // A team-building turn likely changed agents/teams — refresh both.
+            try { loadTeams(); } catch (e) {}
+            refreshData();
+            break;
+        case 'master_exec': {
+            const ex = document.getElementById('master-exec-line');
+            if (ex) {
+                const label = payload.kind === 'tool_start' ? `▸ ${payload.name}…`
+                    : payload.kind === 'tool_result' ? `✓ ${payload.name}`
+                    : payload.kind === 'thinking' ? (payload.text || 'thinking…') : '';
+                if (label) { ex.textContent = label; ex.classList.add('active'); }
+            }
+            break;
+        }
         case 'telemetry':
             if (agentData[payload.agent_name]) agentData[payload.agent_name].telemetry = payload.telemetry;
             renderAgents();
@@ -1661,7 +1754,13 @@ let setupProviders = [];
 async function checkSetup() {
     try {
         const d = await fetch(`${API_URL}/setup/status`).then(r => r.json());
-        if (!d.configured) showModelSettings(true);
+        if (!d.configured) { showModelSettings(true); return; }
+        // Model is configured but no teams exist yet → greet with the Architect,
+        // which builds the first team conversationally (once per page load).
+        try {
+            const teams = (await fetch(`${API_URL}/teams`).then(r => r.json())).teams || [];
+            if (!teams.length) openMaster();
+        } catch (e) { /* non-fatal */ }
     } catch (e) { /* non-fatal */ }
 }
 
@@ -1702,6 +1801,8 @@ async function showModelSettings(firstRun) {
         const vis = document.getElementById('setup-vision-model');
         vis.value = s.vision_model || '';
         vis.placeholder = s.vision_model_default ? `(default: ${s.vision_model_default})` : '(multimodal model id)';
+        const mm = document.getElementById('setup-master-model');
+        if (mm) mm.value = s.master_model || '';
     } catch (e) { /* non-fatal */ }
     showModal('modal-setup');
 }
@@ -1758,6 +1859,7 @@ async function postSetup(body) {
                     summary_model: document.getElementById('setup-summary-model').value.trim(),
                     digest_enabled: document.getElementById('setup-digest-enabled').checked,
                     vision_model: document.getElementById('setup-vision-model').value.trim(),
+                    master_model: document.getElementById('setup-master-model').value.trim(),
                 }),
             });
         } catch (e) { /* non-fatal */ }
@@ -1954,8 +2056,41 @@ function mdToHtml(raw) {
     let html = '', listType = null, para = [];
     const flushPara = () => { if (para.length) { html += '<p>' + para.join('<br>') + '</p>'; para = []; } };
     const closeList = () => { if (listType) { html += '</' + listType + '>'; listType = null; } };
-    for (const line of lines) {
+    // GFM table helpers: a delimiter row is all dashes/colons separated by pipes.
+    const isDelimRow = (l) => l.indexOf('|') >= 0 && /^\s*\|?(\s*:?-{1,}:?\s*\|)+(\s*:?-{1,}:?\s*)?\|?\s*$/.test(l);
+    const splitRow = (row) => {
+        let r = row.trim();
+        if (r.startsWith('|')) r = r.slice(1);
+        if (r.endsWith('|')) r = r.slice(0, -1);
+        return r.split('|').map(c => c.trim());
+    };
+    for (let li = 0; li < lines.length; li++) {
+        const line = lines[li];
         let m;
+        // GFM table: a header row (with pipes) immediately followed by a
+        // |---|---| delimiter row, then zero+ body rows.
+        if (line.indexOf('|') >= 0 && !isDelimRow(line) && li + 1 < lines.length && isDelimRow(lines[li + 1])) {
+            const headers = splitRow(line);
+            const aligns = splitRow(lines[li + 1]).map(c => {
+                const l = c.startsWith(':'), r = c.endsWith(':');
+                return (l && r) ? 'center' : r ? 'right' : l ? 'left' : '';
+            });
+            const al = (k) => aligns[k] ? ` style="text-align:${aligns[k]}"` : '';
+            let body = '', j = li + 2;
+            while (j < lines.length && lines[j].indexOf('|') >= 0 && !/^\s*$/.test(lines[j]) && !isDelimRow(lines[j])) {
+                const cells = splitRow(lines[j]);
+                body += '<tr>';
+                for (let k = 0; k < headers.length; k++) body += `<td${al(k)}>${cells[k] !== undefined ? cells[k] : ''}</td>`;
+                body += '</tr>';
+                j++;
+            }
+            flushPara(); closeList();
+            html += '<table class="md-table"><thead><tr>'
+                + headers.map((h, k) => `<th${al(k)}>${h}</th>`).join('')
+                + '</tr></thead><tbody>' + body + '</tbody></table>';
+            li = j - 1;
+            continue;
+        }
         if ((m = line.match(/^\[\[\[CBLK:(\d+)\]\]\]$/))) { flushPara(); closeList(); html += blocks[+m[1]]; continue; }
         if (/^\s*$/.test(line)) { flushPara(); closeList(); continue; }
         if ((m = line.match(/^(#{1,6})\s+(.*)$/))) { flushPara(); closeList(); const lv = m[1].length; html += `<h${lv}>${m[2]}</h${lv}>`; continue; }
@@ -2236,7 +2371,7 @@ function renderLinkEditor(preselectAgent) {
     if (names.length < 2) { body.innerHTML = '<div class="empty-state">Need at least 2 agents to create links</div>'; return; }
 
     const selectOpts = names.map(n => `<option value="${escAttr(n)}">${esc(agentData[n]?.config?.name || n)}</option>`).join('');
-    let html = '<div style="margin-bottom:12px;font-size:12px;color:var(--text-muted)">Click a peer tag to toggle the link.</div>';
+    let html = '<div style="margin-bottom:12px;font-size:12px;color:var(--text-muted)">Click a peer tag to toggle the link. Links are <b>bidirectional</b> — connecting A to B lets them message each other both ways.</div>';
 
     names.forEach(n => {
         const peers = agentData[n]?.config?.allowed_peers || [];
@@ -2279,6 +2414,142 @@ function toggleInbox() {
     if (document.getElementById('inbox-panel').classList.contains('open')) {
         loadInbox();
     }
+}
+
+/* ===== ARCHITECT (master team-builder) ===== */
+let masterBusy = false;
+let masterHistoryLoaded = false;
+
+const MASTER_WELCOME = `**I'm the Architect** — your team builder for this swarm.
+
+I understand the whole framework, so you don't have to wire agents by hand. Tell me **what you want to accomplish** and I'll:
+
+- ask a few focused questions about your goal,
+- propose a team (agents, their roles/souls, who talks to whom, a shared brief),
+- and once you approve, **build it live** — create the agents, write their souls, link them, set up \`workspace.md\`, and offer to kick them off.
+
+I can also edit existing teams ("add a QA agent to acme", "rewrite the brief"). What are we building?`;
+
+function autoGrowMaster(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 168) + 'px';
+}
+
+function openMaster() {
+    const p = document.getElementById('master-panel');
+    if (p.classList.contains('open')) return;
+    p.classList.add('open');
+    document.getElementById('master-overlay').classList.add('open');
+    loadMasterStatus();
+    if (!masterHistoryLoaded) loadMasterHistory();
+    setTimeout(() => document.getElementById('master-input')?.focus(), 60);
+}
+
+function toggleMaster() {
+    const p = document.getElementById('master-panel');
+    if (p.classList.contains('open')) {
+        p.classList.remove('open');
+        document.getElementById('master-overlay').classList.remove('open');
+    } else {
+        openMaster();
+    }
+}
+
+async function loadMasterStatus() {
+    try {
+        const d = await fetch(`${API_URL}/master/status`).then(r => r.json());
+        const tag = document.getElementById('master-model-tag');
+        if (tag) tag.textContent = d.model || '';
+        setMasterBusy(!!d.busy);
+    } catch (e) { /* non-fatal */ }
+}
+
+async function loadMasterHistory() {
+    try {
+        const d = await fetch(`${API_URL}/master/history`).then(r => r.json());
+        renderMasterMessages(d.messages || []);
+        masterHistoryLoaded = true;
+    } catch (e) { /* non-fatal */ }
+}
+
+function renderMasterMessages(messages) {
+    const body = document.getElementById('master-body');
+    if (!body) return;
+    // Empty conversation → greet with a hardcoded welcome (client-only, not
+    // persisted) describing who the Architect is.
+    if (!messages.length) {
+        body.innerHTML = masterBubbleHTML('assistant', MASTER_WELCOME);
+        body.scrollTop = 0;
+        return;
+    }
+    body.innerHTML = messages.map(m => masterBubbleHTML(m.role, m.content)).join('');
+    body.scrollTop = body.scrollHeight;
+}
+
+function masterBubbleHTML(role, content) {
+    const r = role === 'user' ? 'user' : role === 'system' ? 'system' : 'assistant';
+    if (r === 'system') return `<div class="m-msg system">${esc(content)}</div>`;
+    const label = r === 'user' ? 'You' : 'Architect';
+    // Architect replies are markdown; user text stays literal (XSS-safe esc).
+    const inner = r === 'assistant' ? `<div class="md">${mdToHtml(content)}</div>` : esc(content);
+    return `<div class="m-msg ${r}"><div class="m-role">${label}</div>${inner}</div>`;
+}
+
+function appendMasterMessage(role, content) {
+    const body = document.getElementById('master-body');
+    if (!body) return;
+    // Drop the empty-state placeholder on first real message.
+    const empty = body.querySelector('.empty-state');
+    if (empty) body.innerHTML = '';
+    body.insertAdjacentHTML('beforeend', masterBubbleHTML(role, content));
+    body.scrollTop = body.scrollHeight;
+}
+
+function setMasterBusy(busy) {
+    masterBusy = busy;
+    const panel = document.getElementById('master-panel');
+    if (panel) panel.classList.toggle('busy', busy);
+    const btn = document.getElementById('master-send-btn');
+    if (btn) btn.textContent = busy ? 'Working…' : 'Send';
+    const exec = document.getElementById('master-exec-line');
+    if (exec && !busy) { exec.textContent = ''; exec.classList.remove('active'); }
+}
+
+async function sendMasterMsg() {
+    if (masterBusy) return;
+    const input = document.getElementById('master-input');
+    const message = (input.value || '').trim();
+    if (!message) return;
+    appendMasterMessage('user', message);
+    input.value = '';
+    input.style.height = '44px';
+    setMasterBusy(true);
+    try {
+        const res = await fetch(`${API_URL}/master/chat`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message }),
+        });
+        if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            appendMasterMessage('system', d.error || `Error ${res.status}`);
+            setMasterBusy(false);
+        }
+        // On success the reply arrives via the master_message WS event.
+    } catch (e) {
+        appendMasterMessage('system', `Request failed: ${e.message}`);
+        setMasterBusy(false);
+    }
+}
+
+async function resetMaster() {
+    try {
+        await fetch(`${API_URL}/master/reset`, { method: 'POST' });
+    } catch (e) { /* non-fatal */ }
+    const body = document.getElementById('master-body');
+    if (body) { body.innerHTML = ''; }
+    masterHistoryLoaded = false;
+    loadMasterHistory();
+    setMasterBusy(false);
 }
 
 function bumpInboxBadge(delta) {

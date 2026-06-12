@@ -171,6 +171,11 @@ async def lifespan(app: FastAPI):
     for agent_name, agent_cfg in cfg["agents"].items():
         register_agent_daemon(agent_name, agent_cfg, loop)
 
+    # Wire the Architect (master team-builder): register its toolset (so team
+    # agents' swarm_master deny-guard has something to deny) and inject the
+    # thread-safe daemon lifecycle hooks it uses to spawn/despawn/update agents.
+    _wire_master(loop)
+
     prune_task = loop.create_task(_periodic_monitoring_prune())
     digest_task = loop.create_task(_periodic_digest())
     loopdet_task = loop.create_task(_periodic_loop_detector())
@@ -365,6 +370,8 @@ async def post_settings(request: Request):
         fields["digest_enabled"] = body.get("digest_enabled")
     if "vision_model" in body:
         fields["vision_model"] = body.get("vision_model")
+    if "master_model" in body:
+        fields["master_model"] = body.get("master_model")
     if not fields:
         return JSONResponse({"error": "no recognized settings keys"}, status_code=400)
     before_vision = (get_global_settings().get("vision_model") or "").strip()
@@ -377,6 +384,14 @@ async def post_settings(request: Request):
                 _update_daemon_cfg(name, load_agents_config()["agents"].get(name, daemons[name].cfg))
             except Exception as e:
                 log.warning("vision_model re-init failed for %s: %s", name, e)
+    # The Architect picks up a new master_model on its next turn.
+    if "master_model" in fields:
+        try:
+            from swarm_server.master import get_master
+
+            get_master().reload()
+        except Exception as e:  # noqa: BLE001
+            log.warning("master reload failed: %s", e)
     from swarm_server.websocket import _broadcast
 
     _broadcast("settings_updated", settings)
@@ -1136,6 +1151,120 @@ def _refresh_daemon_crons(agent_name: str):
     from swarm_server.websocket import _broadcast
 
     _broadcast("cron_updated", {"agent_name": agent_name, "timestamp": __import__("time").time()})
+
+
+# ---------------------------------------------------------------------------
+# Architect / master team-builder. A teamless Hermes agent the human chats with
+# to design and build teams. Its tools mutate config + spawn/despawn daemons; the
+# daemon lifecycle must happen on THIS event loop, so we inject thread-safe hooks
+# (the master turn runs on its own worker thread). See swarm_server/master.py.
+# ---------------------------------------------------------------------------
+def _master_spawn(agent_name: str, loop: asyncio.AbstractEventLoop) -> None:
+    def _do():
+        cfg = load_agents_config()
+        ac = cfg["agents"].get(agent_name)
+        if ac is not None and agent_name not in daemons:
+            register_agent_daemon(agent_name, ac, loop)
+    loop.call_soon_threadsafe(_do)
+
+
+def _master_update(agent_name: str, loop: asyncio.AbstractEventLoop) -> None:
+    def _do():
+        cfg = load_agents_config()
+        ac = cfg["agents"].get(agent_name)
+        if ac is not None:
+            _update_daemon_cfg(agent_name, ac)
+    loop.call_soon_threadsafe(_do)
+
+
+async def _master_despawn_coro(token: str) -> None:
+    """Drain + delete an agent, or (for a '__team__:<id>' token) every agent in a
+    team and then the team itself. Runs on the event loop."""
+    if token.startswith("__team__:"):
+        team_id = token.split(":", 1)[1]
+        members = [
+            n for n, a in load_agents_config()["agents"].items()
+            if a.get("team_id") == team_id
+        ]
+        for n in members:
+            d = daemons.get(n)
+            if d is not None:
+                await _interrupt_and_drain(d)
+            _stop_and_unregister_daemon(n)
+        delete_team(load_agents_config(), team_id)
+        return
+    d = daemons.get(token)
+    if d is not None:
+        await _interrupt_and_drain(d)
+    _stop_and_unregister_daemon(token)
+    delete_agent(load_agents_config(), token)
+
+
+def _master_despawn(token: str, loop: asyncio.AbstractEventLoop) -> None:
+    # Block the master worker thread until the drain+delete finishes, so a team
+    # teardown deletes members before dropping the team record.
+    fut = asyncio.run_coroutine_threadsafe(_master_despawn_coro(token), loop)
+    try:
+        fut.result(timeout=90)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[master] despawn '%s' failed: %s", token, e)
+
+
+def _wire_master(loop: asyncio.AbstractEventLoop) -> None:
+    try:
+        from swarm_server import master as _master
+
+        _master.set_master_hooks(
+            spawn=lambda n: _master_spawn(n, loop),
+            despawn=lambda n: _master_despawn(n, loop),
+            update=lambda n: _master_update(n, loop),
+        )
+        try:
+            _master.register_master_tools()
+        except Exception as e:  # noqa: BLE001 — registry may be unavailable in tests
+            log.warning("[master] tool registration deferred: %s", e)
+        log.info("[master] Architect wired")
+    except Exception as e:  # noqa: BLE001
+        log.warning("[master] wiring failed: %s", e)
+
+
+@app.get("/master/status")
+async def master_status():
+    from swarm_server.master import get_master
+
+    m = get_master()
+    return JSONResponse({"configured": m.is_configured(), "busy": m.is_busy(), "model": m.model()})
+
+
+@app.get("/master/history")
+async def master_history(limit: int = 120):
+    from swarm_server.master import get_master
+
+    return JSONResponse({"messages": get_master().history(max(1, min(int(limit or 120), 500)))})
+
+
+@app.post("/master/chat")
+async def master_chat(request: Request):
+    from swarm_server.master import get_master
+
+    body = await request.json()
+    message = (body.get("message") or "").strip()
+    if not message:
+        return JSONResponse({"error": "message is required"}, status_code=400)
+    m = get_master()
+    if not m.is_configured():
+        return JSONResponse({"error": "no model configured — set one in Model settings first"}, status_code=409)
+    if not m.submit(message):
+        return JSONResponse({"error": "the Architect is still working on the previous message"}, status_code=409)
+    return JSONResponse({"status": "accepted"})
+
+
+@app.post("/master/reset")
+async def master_reset():
+    from swarm_server.master import get_master
+
+    get_master().reset()
+    return JSONResponse({"status": "ok"})
 
 
 @app.get("/toolsets")

@@ -1225,16 +1225,39 @@ def delete_agent(cfg: Dict[str, Any], name: str) -> bool:
 
 
 def set_agent_peers(cfg: Dict[str, Any], name: str, peers: List[str]) -> Dict[str, Any]:
+    """Set agent ``name``'s peer list to EXACTLY ``peers``, BIDIRECTIONALLY.
+
+    All swarm connections are bidirectional: a link is stored on both agents'
+    ``allowed_peers`` and authorizes messaging either way. This setter therefore
+    syncs the reverse side too — it adds ``name`` to every new peer and removes
+    ``name`` from any agent that is no longer a peer — so there is never a
+    one-directional ("A can message B but not vice-versa") link.
+    """
     if name not in cfg["agents"]:
         raise ValueError(f"Agent '{name}' not found")
     name_team = cfg["agents"][name].get("team_id")
+    desired: List[str] = []
     for peer in peers:
+        peer = str(peer)
+        if peer == name:
+            raise ValueError("An agent cannot be linked to itself.")
         if peer not in cfg["agents"]:
             raise ValueError(f"Peer agent '{peer}' not found")
         peer_team = cfg["agents"][peer].get("team_id")
         if name_team and peer_team and name_team != peer_team:
             raise ValueError(f"Cross-team peer links are blocked: '{name}' (team={name_team}) → '{peer}' (team={peer_team})")
-    cfg["agents"][name]["allowed_peers"] = list(peers)
+        if peer not in desired:
+            desired.append(peer)
+    cfg["agents"][name]["allowed_peers"] = list(desired)
+    # Sync the reverse side on every other agent so the relation stays symmetric.
+    for other_name, other in cfg["agents"].items():
+        if other_name == name:
+            continue
+        plist = list(other.get("allowed_peers", []))
+        if other_name in desired and name not in plist:
+            other["allowed_peers"] = plist + [name]
+        elif other_name not in desired and name in plist:
+            other["allowed_peers"] = [p for p in plist if p != name]
     _save_full_config(cfg)
     return cfg["agents"][name]
 
@@ -1301,14 +1324,20 @@ def get_team_agents(cfg: Dict[str, Any], team_id: str) -> Dict[str, Any]:
 
 
 def peer_allowed(cfg: Dict[str, Any], caller: str, target: str) -> bool:
-    """Return True if caller is explicitly linked to target AND same team."""
+    """Return True if caller and target are linked AND on the same team.
+
+    Connections are bidirectional, so EITHER side listing the other authorizes
+    messaging in both directions. Checking both sides also makes the permission
+    robust to any legacy data where only one side recorded the link.
+    """
     caller_cfg = cfg["agents"].get(caller)
     target_cfg = cfg["agents"].get(target)
     if not caller_cfg or not target_cfg:
         return False
     if caller_cfg.get("team_id") != target_cfg.get("team_id"):
         return False
-    return target in caller_cfg.get("allowed_peers", [])
+    return (target in caller_cfg.get("allowed_peers", [])
+            or caller in target_cfg.get("allowed_peers", []))
 
 
 # ---------------------------------------------------------------------------
@@ -1368,6 +1397,8 @@ _GLOBAL_SETTINGS_DEFAULTS = {
     # browser_locate). "" => the VISION_MODEL env/code default. UI-settable;
     # written into every agent's auxiliary.vision config on re-init.
     "vision_model": "",
+    # "" => the Architect (master team-builder) uses the swarm default model.
+    "master_model": "",
 }
 
 
@@ -1395,6 +1426,8 @@ def update_global_settings(fields: Dict[str, Any]) -> Dict[str, Any]:
             settings["digest_enabled"] = bool(fields["digest_enabled"])
         if "vision_model" in fields:
             settings["vision_model"] = (fields["vision_model"] or "").strip()
+        if "master_model" in fields:
+            settings["master_model"] = (fields["master_model"] or "").strip()
         cfg["settings"] = settings
         _save_full_config(cfg)
     out = dict(_GLOBAL_SETTINGS_DEFAULTS)

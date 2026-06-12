@@ -725,8 +725,14 @@ class AgentDaemon:
                 if en_ts:
                     extra_kwargs["enabled_toolsets"] = en_ts
                 dis_ts = _as_list(self.cfg.get("disabled_toolsets"))
-                if dis_ts:
-                    extra_kwargs["disabled_toolsets"] = dis_ts
+                # ALWAYS deny the Architect's swarm_master toolset to team agents.
+                # It is registered in the shared Hermes registry, so a team agent
+                # initialized without an enabled_toolsets whitelist would otherwise
+                # auto-load it (get_tool_definitions(None) = all toolsets) and gain
+                # team/agent-mutating powers. The master's caller-guard is a second
+                # line of defense; this is the first.
+                dis_ts = (dis_ts or []) + ["swarm_master"]
+                extra_kwargs["disabled_toolsets"] = dis_ts
 
                 if _eff_provider:
                     extra_kwargs["provider"] = _eff_provider
