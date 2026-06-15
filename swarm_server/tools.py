@@ -317,6 +317,40 @@ _LOG_DECISION_TOOL_SCHEMA = {
     },
 }
 
+_RECALL_DECISIONS_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "recall_decisions",
+        "description": (
+            "Search your team's PAST decision log so you can change course instead "
+            "of repeating yourself. Your prompt always carries the last ~20 "
+            "decisions; use THIS to reach further back or to grep the history of a "
+            "strategy by keyword. Use it when your current approach is stalling or "
+            "not working — review what was already tried, what was verified, and "
+            "what was ruled out, then pivot. Returns matching decisions newest "
+            "first with who logged them and when."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Optional keyword/substring to filter decisions (e.g. "
+                        "'pricing', 'checkout', 'onboarding'). Omit to get the most "
+                        "recent decisions across all topics."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max decisions to return (default 40, max 200).",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
 _CLOSE_LEDGER_ENTRY_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -518,17 +552,19 @@ _SCHEDULE_WAKEUP_TOOL_SCHEMA = {
     "function": {
         "name": "schedule_wakeup",
         "description": (
-            "Schedule a recurring future wake-up for YOURSELF. At each scheduled "
-            "time the swarm injects your 'instruction' to you as a new task and you "
-            "act on it — use this for anything periodic (a 9am competitor check, an "
-            "hourly metrics pull, a Monday digest) so it happens on time without a "
-            "human. Keep the instruction GOAL-LEVEL and short (max 600 chars): what "
-            "to achieve, where the data lives, when to escalate. Do NOT inline a "
-            "step-by-step script — the world changes and a frozen script rots; put "
-            "detailed procedures in a workspace runbook file (e.g. "
-            "docs/<name>-runbook.md) and reference its path so each firing follows "
-            "the file's LATEST version. Check your current wake-ups (listed in the "
-            "live team context) first so you don't create duplicates."
+            "Schedule a future wake-up for YOURSELF — recurring OR one-time. At each "
+            "scheduled time the swarm injects your 'instruction' to you as a new task "
+            "and you act on it. Use it for anything periodic (a 9am competitor check, "
+            "an hourly metrics pull, a Monday digest) so it happens on time without a "
+            "human. IMPORTANT: for a task that should run only ONCE at a future time, "
+            "set max_runs=1 — otherwise the schedule recurs forever and keeps pulling "
+            "you back to it instead of letting you move on to new work. Keep the "
+            "instruction GOAL-LEVEL and short (max 600 chars): what to achieve, where "
+            "the data lives, when to escalate. Do NOT inline a step-by-step script — "
+            "the world changes and a frozen script rots; put detailed procedures in a "
+            "workspace runbook file (e.g. docs/<name>-runbook.md) and reference its "
+            "path so each firing follows the file's LATEST version. Check your current "
+            "wake-ups (listed in the live team context) first so you don't duplicate."
         ),
         "parameters": {
             "type": "object",
@@ -547,6 +583,14 @@ _SCHEDULE_WAKEUP_TOOL_SCHEMA = {
                     "description": (
                         "Goal-level task to run each time it fires (max 600 chars). "
                         "Reference a workspace runbook file for detailed steps."
+                    ),
+                },
+                "max_runs": {
+                    "type": "integer",
+                    "description": (
+                        "Optional. Total times to fire before the wake-up auto-stops. "
+                        "Set max_runs=1 for a ONE-TIME future task. Omit for an "
+                        "indefinitely recurring schedule."
                     ),
                 },
             },
@@ -1059,6 +1103,53 @@ def _log_decision_handler(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "message": "Decision recorded."})
 
 
+def _recall_decisions_handler(args: dict, **kwargs) -> str:
+    from datetime import datetime
+
+    caller = _caller_from_kwargs(kwargs)
+    query = (args.get("query") or "").strip() or None
+    try:
+        limit = int(args.get("limit") or 40)
+    except (TypeError, ValueError):
+        limit = 40
+
+    from swarm_server.config import load_agents_config
+
+    cfg = load_agents_config()
+    team_id = cfg["agents"].get(caller, {}).get("team_id", "default")
+
+    rows = monitor_db.search_decisions(team_id=team_id, query=query, limit=limit)
+    # Surface the rolled-up milestone too, so "further back" really reaches the
+    # long-term memory that has scrolled out of the live window.
+    milestone = None
+    try:
+        ms = monitor_db.get_latest_milestone(team_id)
+        if ms and ms.get("summary"):
+            milestone = ms["summary"]
+    except Exception:
+        pass
+
+    out = []
+    for r in rows:
+        try:
+            stamp = datetime.fromtimestamp(r.get("timestamp", 0)).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            stamp = "?"
+        out.append({"when": stamp, "agent": r.get("agent_name"),
+                    "decision": r.get("decision")})
+
+    return json.dumps({
+        "success": True,
+        "count": len(out),
+        "query": query,
+        "milestone": milestone,
+        "decisions": out,
+        "message": (f"{len(out)} decision(s)"
+                    + (f" matching '{query}'" if query else "")
+                    + (" (none found — nothing logged yet on this)" if not out else "")),
+    })
+
+
 def _close_ledger_entry_handler(args: dict, **kwargs) -> str:
     caller = _caller_from_kwargs(kwargs)
     msg_id = (args.get("msg_id") or "").strip()
@@ -1225,8 +1316,12 @@ def _schedule_wakeup_handler(args: dict, **kwargs) -> str:
     cfg = load_agents_config()
     if caller not in cfg["agents"]:
         return json.dumps({"success": False, "error": f"Agent '{caller}' not found."})
+    max_runs = args.get("max_runs")
+    if max_runs in ("", None):
+        max_runs = None
     try:
-        entry = add_agent_cron(cfg, caller, schedule, instruction, created_by="agent")
+        entry = add_agent_cron(cfg, caller, schedule, instruction,
+                               created_by="agent", max_runs=max_runs)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
 
@@ -1240,16 +1335,22 @@ def _schedule_wakeup_handler(args: dict, **kwargs) -> str:
     except Exception:
         pass
 
-    log.info("[%s] [schedule_wakeup] id=%s schedule=%s", caller, entry["id"][:8], entry["schedule"])
-    monitor_db.log_event(caller, "cron_created", data={"cron_id": entry["id"], "schedule": entry["schedule"]})
+    log.info("[%s] [schedule_wakeup] id=%s schedule=%s max_runs=%s",
+             caller, entry["id"][:8], entry["schedule"], entry.get("max_runs"))
+    monitor_db.log_event(caller, "cron_created", data={"cron_id": entry["id"],
+                         "schedule": entry["schedule"], "max_runs": entry.get("max_runs")})
     _broadcast("cron_updated", {"agent_name": caller, "action": "created", "timestamp": time.time()})
+    mr = entry.get("max_runs")
+    bound = (" Fires once, then auto-stops." if mr == 1
+             else f" Fires {mr}× then auto-stops." if mr else " Recurring.")
     return json.dumps({
         "success": True,
         "cron_id": entry["id"],
         "schedule": entry["schedule"],
         "describe": cron_describe(entry["schedule"]),
+        "max_runs": mr,
         "next_fire_at": nxt,
-        "message": f"Wake-up scheduled ({cron_describe(entry['schedule'])}). Next fire: {nxt or 'unknown'}.",
+        "message": f"Wake-up scheduled ({cron_describe(entry['schedule'])}).{bound} Next fire: {nxt or 'unknown'}.",
     })
 
 
@@ -1416,6 +1517,15 @@ def _register_custom_tools():
                 description="Append one significant decision to the shared decision log.",
             )
             log.info("[log_decision] Registered")
+        if "recall_decisions" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="recall_decisions",
+                toolset="custom",
+                schema=_RECALL_DECISIONS_TOOL_SCHEMA["function"],
+                handler=_recall_decisions_handler,
+                description="Search the team's past decision log to review and pivot strategy.",
+            )
+            log.info("[recall_decisions] Registered")
         if "close_ledger_entry" not in (registry.get_tool_to_toolset_map() or {}):
             registry.register(
                 name="close_ledger_entry",

@@ -272,6 +272,35 @@ class MonitoringDB:
             log.warning("[MonitorDB] Failed to read decisions: %s", e)
             return []
 
+    def search_decisions(self, team_id: str = None, query: str = None,
+                         limit: int = 40) -> List[dict]:
+        """Search the decision log on demand (for the recall_decisions tool).
+
+        Newest first. Optionally scoped by ``team_id`` and filtered to decisions
+        whose text contains ``query`` (case-insensitive substring). Unlike
+        get_recent_decisions (fixed 20, prompt injection), this lets an agent
+        reach further back and grep its team's strategy history."""
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                sql = ("SELECT timestamp, agent_name, decision FROM decisions "
+                       "WHERE 1=1")
+                params: list = []
+                if team_id:
+                    sql += " AND team_id = ?"
+                    params.append(team_id)
+                if query:
+                    sql += " AND decision LIKE ? ESCAPE '\\'"
+                    esc = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    params.append(f"%{esc}%")
+                sql += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(max(1, min(int(limit), 200)))
+                rows = conn.execute(sql, params).fetchall()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            log.warning("[MonitorDB] search_decisions failed: %s", e)
+            return []
+
     def get_events(
         self,
         agent_name: str = None,

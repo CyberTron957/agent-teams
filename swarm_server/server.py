@@ -1319,6 +1319,8 @@ def _crons_with_runtime(agent_name: str, stored: list) -> list:
             "describe": cron_describe(c.get("schedule", "")),
             "next_fire_at": rt.get("next_fire_at"),
             "last_fired_at": rt.get("last_fired_at"),
+            # Live fire count (in-memory for unbounded crons, persisted for bounded).
+            "runs": rt.get("runs") or c.get("runs", 0),
         })
     return out
 
@@ -1339,12 +1341,14 @@ async def post_agent_cron(agent_name: str, request: Request):
     if agent_name not in cfg["agents"]:
         return JSONResponse({"error": "agent not found"}, status_code=404)
     try:
+        mr = body.get("max_runs")
         entry = add_agent_cron(
             cfg, agent_name,
             schedule=body.get("schedule", ""),
             instruction=body.get("instruction", ""),
             enabled=body.get("enabled", True),
             created_by="human",
+            max_runs=(None if mr in ("", None) else mr),
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)

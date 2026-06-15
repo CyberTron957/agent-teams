@@ -1658,8 +1658,14 @@ def add_agent_cron(
     instruction: str,
     enabled: bool = True,
     created_by: str = "human",
+    max_runs: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Validate + append a cron wake-up to an agent. Returns the new entry."""
+    """Validate + append a cron wake-up to an agent. Returns the new entry.
+
+    ``max_runs`` bounds how many times the wake-up fires before it auto-stops
+    (None = recurs indefinitely). Set ``max_runs=1`` for a ONE-TIME future task
+    — without it, a schedule meant to run once recurs forever and keeps pulling
+    the agent back to it (see record_cron_fire / _maybe_fire_crons)."""
     from swarm_server.cron import cron_validate
 
     instruction = _validate_cron_instruction(instruction, created_by)
@@ -1674,6 +1680,15 @@ def add_agent_cron(
         "created_at": int(time.time()),
         "created_by": created_by,
     }
+    if max_runs is not None:
+        try:
+            mr = int(max_runs)
+        except (TypeError, ValueError):
+            raise ValueError("max_runs must be a positive integer.")
+        if mr < 1:
+            raise ValueError("max_runs must be >= 1.")
+        entry["max_runs"] = mr
+        entry["runs"] = 0
     # Atomic RMW against a FRESH load under the lock, so appending a cron can't
     # clobber a concurrent writer (e.g. another agent's session-id persist) by
     # saving a stale full config.
@@ -1732,6 +1747,33 @@ def remove_agent_cron(cfg: Dict[str, Any], name: str, cron_id: str) -> bool:
     a["crons"] = remaining
     _save_full_config(cfg)
     return True
+
+
+def record_cron_fire(name: str, cron_id: str) -> Dict[str, Any]:
+    """Persist that a cron just fired: increment its run counter and, if it has a
+    ``max_runs`` bound it has now reached, disable it so it never fires again.
+
+    This is what makes a one-time wake-up (max_runs=1) actually stop. Returns
+    ``{"runs", "max_runs", "completed"}``; ``completed`` is True when the cron
+    was just auto-disabled. Atomic RMW under the config lock so a concurrent
+    writer can't clobber the counter."""
+    with _config_lock:
+        full = load_agents_config()
+        a = full["agents"].get(name)
+        if a is None:
+            return {"runs": 0, "max_runs": None, "completed": False}
+        for c in a.get("crons", []):
+            if c.get("id") != cron_id:
+                continue
+            runs = int(c.get("runs", 0)) + 1
+            c["runs"] = runs
+            max_runs = c.get("max_runs")
+            completed = max_runs is not None and runs >= int(max_runs)
+            if completed:
+                c["enabled"] = False
+            _save_full_config(full)
+            return {"runs": runs, "max_runs": max_runs, "completed": completed}
+    return {"runs": 0, "max_runs": None, "completed": False}
 
 
 # Ensure tool subprocesses (rg/grep/find) always have a usable PATH, no matter

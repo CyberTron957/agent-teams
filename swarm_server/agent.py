@@ -397,6 +397,10 @@ class AgentDaemon:
         self._cron_next: Dict[str, float] = {}
         self._cron_last: Dict[str, float] = {}
         self._cron_sched: Dict[str, str] = {}
+        # Fire count this process (for the supervisor's cron view); bounded crons
+        # also persist their count via config.record_cron_fire so a one-shot stays
+        # done across restarts.
+        self._cron_runs: Dict[str, int] = {}
         self._load_crons(cfg)
         # Monotonic sequence for ephemeral live-execution events (exec_*). Lets the
         # dashboard order/dedupe the streamed thinking/tool/answer steps per turn.
@@ -508,6 +512,8 @@ class AgentDaemon:
                 **c,
                 "next_fire_at": self._cron_next.get(cid),
                 "last_fired_at": self._cron_last.get(cid),
+                # Live fire count (persisted value if present, else this process's).
+                "runs": int(c.get("runs", 0)) or self._cron_runs.get(cid, 0),
             })
         return out
 
@@ -780,6 +786,14 @@ class AgentDaemon:
                     self._ai_agent.tools = list(self._ai_agent.tools or [])
                     self._ai_agent.tools.append(_LOG_DECISION_TOOL_SCHEMA)
                     self._ai_agent.valid_tool_names.add("log_decision")
+                # Strategy memory: search the team's past decisions on demand to
+                # review what's been tried and pivot (complements the 20-decision
+                # window auto-injected each turn).
+                if "recall_decisions" not in existing_names and "recall_decisions" not in disabled:
+                    from swarm_server.tools import _RECALL_DECISIONS_TOOL_SCHEMA
+                    self._ai_agent.tools = list(self._ai_agent.tools or [])
+                    self._ai_agent.tools.append(_RECALL_DECISIONS_TOOL_SCHEMA)
+                    self._ai_agent.valid_tool_names.add("recall_decisions")
                 if "log_action" not in existing_names and "log_action" not in disabled:
                     from swarm_server.tools import _LOG_ACTION_TOOL_SCHEMA
                     self._ai_agent.tools = list(self._ai_agent.tools or [])
@@ -1710,6 +1724,39 @@ class AgentDaemon:
                     f"{(q.get('question') or '').strip()[:90]}")
         except Exception:
             pass
+
+        # Active cron wake-ups per watched agent. A recurring schedule that was
+        # really a one-time task fires forever and quietly monopolises the agent
+        # — surface these so the supervisor can catch a runaway and tell the
+        # owner to cancel_wakeup it (or re-create it with max_runs).
+        cron_lines = []
+        for p in peers:
+            daemon = _daemon_registry.get(p)
+            if daemon is None:
+                continue
+            try:
+                crons = [c for c in daemon.crons_runtime() if c.get("enabled", True)]
+            except Exception:
+                crons = []
+            if not crons:
+                continue
+            parts = []
+            for c in crons[:6]:
+                runs = c.get("runs") or 0
+                mr = c.get("max_runs")
+                age = _age_short(max(0.0, now - float(c.get("created_at") or now)))
+                tag = (f", fired {runs}×" if runs else "")
+                tag += (f"/{mr}" if mr else (" recurring" if not runs else "×"))
+                parts.append(
+                    f"[{(c.get('id') or '')[:6]}] {c.get('schedule')} "
+                    f"(set {age} ago{tag}): {(c.get('instruction') or '').strip()[:70]}")
+            cron_lines.append(f"CRONS {p}: " + " | ".join(parts))
+        if cron_lines:
+            lines.extend(cron_lines)
+            lines.append(
+                "Review CRONS: a one-time task scheduled as a recurring wake-up "
+                "(high fire count, no max_runs, same instruction repeating) will "
+                "derail its owner — message the agent to cancel_wakeup it.")
         return "\n".join(lines)
 
     def _oldest_open_delegation_age(self, peers: List[str],
@@ -1908,6 +1955,30 @@ class AgentDaemon:
             })
             self.ingest_task("cron", prompt)
             self._cron_last[cid] = now
+            self._cron_runs[cid] = self._cron_runs.get(cid, 0) + 1
+
+            # Bounded wake-up (max_runs): persist the fire and stop it for good
+            # once it has run its course. This is what keeps a one-time task
+            # (max_runs=1) from recurring forever and monopolising the agent.
+            if c.get("max_runs"):
+                try:
+                    from swarm_server.config import record_cron_fire
+                    res = record_cron_fire(self.name, cid)
+                except Exception as e:  # noqa: BLE001 — never let bookkeeping abort a fire
+                    log.warning("[%s] record_cron_fire failed for %s: %s", self.name, cid, e)
+                    res = {"completed": False}
+                if res.get("completed"):
+                    c["enabled"] = False
+                    self._cron_next.pop(cid, None)
+                    log.info("[%s] Cron '%s' completed (%s run(s)) — auto-stopped",
+                             self.name, cid, res.get("runs"))
+                    monitor_db.log_event(self.name, "cron_completed",
+                                         data={"cron_id": cid, "schedule": sched,
+                                               "runs": res.get("runs")})
+                    _broadcast("cron_updated", {"agent_name": self.name,
+                                                "action": "completed", "timestamp": now})
+                    continue
+
             # Roll forward to the next occurrence (strictly after now).
             try:
                 self._cron_next[cid] = cron_next(sched, now)

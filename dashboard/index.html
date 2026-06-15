@@ -656,10 +656,11 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
                 <div class="cron-add">
                     <input class="control-input" id="cfg-cron-sched" placeholder="0 9 * * 1-5" aria-label="Cron schedule" onkeydown="if(event.key==='Enter'){event.preventDefault();addAgentCron();}">
                     <input class="control-input" id="cfg-cron-instr" placeholder="Goal-level instruction (put detailed steps in a runbook file)" aria-label="Wake-up instruction" onkeydown="if(event.key==='Enter'){event.preventDefault();addAgentCron();}">
+                    <input class="control-input" id="cfg-cron-maxruns" type="number" min="1" style="flex:0 0 64px" placeholder="∞×" title="Max times to fire, then auto-stop. Blank = recurring forever. 1 = one-time." aria-label="Max runs" onkeydown="if(event.key==='Enter'){event.preventDefault();addAgentCron();}">
                     <button class="btn btn-secondary" type="button" id="cfg-cron-add-btn" onclick="addAgentCron()">Add</button>
                 </div>
                 <div id="cfg-cron-feedback" style="font-size:11px;line-height:1.4;margin-top:4px;min-height:14px"></div>
-                <div style="font-size:10px;color:var(--text-muted);line-height:1.5;margin-top:6px">5-field cron (<code>min hour day month weekday</code>), a macro (<code>@hourly @daily @weekly @monthly</code>), or an interval (<code>@every 30m</code>, <code>@every 2h</code>). Server local time. Agents can also self-schedule via the <code>schedule_wakeup</code> tool.</div>
+                <div style="font-size:10px;color:var(--text-muted);line-height:1.5;margin-top:6px">5-field cron (<code>min hour day month weekday</code>), a macro (<code>@hourly @daily @weekly @monthly</code>), or an interval (<code>@every 30m</code>, <code>@every 2h</code>). Server local time. Set <b>max runs</b> to <code>1</code> for a one-time wake-up (blank = recurring). Agents can also self-schedule via the <code>schedule_wakeup</code> tool.</div>
             </div>
             <div class="control-group" style="margin-top:12px"><span class="control-label"><span data-icon="bar-chart" data-icon-size="11"></span> Live telemetry (read-only)</span><div id="cfg-telemetry" class="cfg-telemetry">No turn run yet.</div></div>
             <div class="control-group"><span class="control-label"><span data-icon="terminal" data-icon-size="11"></span> Hermes CLI — run in terminal to configure this agent without the UI</span><div id="cfg-cli" class="cfg-cli">—</div></div>
@@ -1827,11 +1828,13 @@ function renderCrons(name, crons) {
         const nm = JSON.stringify(name).replace(/"/g, '&quot;');
         const next = enabled ? `Next: ${fmtCronTime(c.next_fire_at)}` : 'Disabled';
         const last = c.last_fired_at ? ` · Last: ${fmtCronTime(c.last_fired_at)}` : '';
+        const runs = c.runs ? ` · fired ${c.runs}×${c.max_runs ? `/${c.max_runs}` : ''}`
+                            : (c.max_runs ? ` · max ${c.max_runs}${c.max_runs === 1 ? ' (once)' : ''}` : '');
         return `<div class="cron-row ${enabled ? '' : 'disabled'}">
             <div class="cron-main">
                 <span class="cron-sched">${esc(c.schedule)}</span> <span class="cron-desc">${esc(c.describe || '')}</span>
                 <div class="cron-instr">${esc(c.instruction || '')}</div>
-                <div class="cron-next">${esc(next)}${esc(last)}${c.created_by === 'agent' ? ' · self-scheduled' : ''}</div>
+                <div class="cron-next">${esc(next)}${esc(last)}${esc(runs)}${c.created_by === 'agent' ? ' · self-scheduled' : ''}</div>
             </div>
             <div class="cron-actions">
                 <label class="cfg-check" title="Enable / disable"><input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleAgentCron(${nm}, ${cid}, this.checked)"></label>
@@ -1854,18 +1857,26 @@ async function addAgentCron() {
     const schedule = document.getElementById('cfg-cron-sched').value.trim();
     const instruction = document.getElementById('cfg-cron-instr').value.trim();
     if (!schedule || !instruction) { cronFeedback('A wake-up needs both a schedule and an instruction.', true); return; }
+    const mrRaw = document.getElementById('cfg-cron-maxruns').value.trim();
+    const body = { schedule, instruction };
+    if (mrRaw) {
+        const mr = parseInt(mrRaw, 10);
+        if (!(mr >= 1)) { cronFeedback('Max runs must be a whole number ≥ 1 (or blank for recurring).', true); return; }
+        body.max_runs = mr;
+    }
     const btn = document.getElementById('cfg-cron-add-btn');
     if (btn) btn.disabled = true;
     cronFeedback('Scheduling…', false);
     try {
         const res = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/crons`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ schedule, instruction }),
+            body: JSON.stringify(body),
         });
         const data = await res.json();
         if (data.error) { cronFeedback(data.error, true); logEvent('error', data.error); return; }
         document.getElementById('cfg-cron-sched').value = '';
         document.getElementById('cfg-cron-instr').value = '';
+        document.getElementById('cfg-cron-maxruns').value = '';
         const next = data.cron && data.cron.schedule ? ` (${data.cron.schedule})` : '';
         cronFeedback(`✓ Wake-up scheduled${next}`, false);
         logEvent('system', `${name}: scheduled wake-up '${schedule}'`);
