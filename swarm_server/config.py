@@ -382,12 +382,11 @@ LIVE_CTX_COMPLETED = int(os.environ.get("SWARM_LIVE_CTX_COMPLETED", "5"))
 # delegate_task (the "delegation" toolset) is ENABLED for workers: a grindy
 # multi-step job (scraping, form-filling, bulk edits) run by a fresh-context
 # sub-agent costs ~10x less than running it in the parent's full history, since
-# every parent iteration re-bills the whole context. The old browser-collision
-# problem (concurrent sub-agents driving one shared tab) is fixed by
-# browser.fresh_tab_per_task (see write_agent_hermes_config) — each sub-agent's
-# unique task_id gets its own tab in the shared Chrome. Supervisors still have
-# it disabled (added per-daemon in agent._ensure_agent): they review and steer,
-# never execute.
+# every parent iteration re-bills the whole context. NOTE: the browser-collision
+# problem (concurrent agents driving one shared tab) is INTENDED to be solved by
+# browser.fresh_tab_per_task (see write_agent_hermes_config), but the installed
+# Hermes does not yet honor that key — see the ⚠ note there. Supervisors do no
+# execution (disabled per-daemon in agent._ensure_agent): they review and steer.
 DISABLED_TOOLSETS: List[str] = [
     "session_search",  # cross-session search — unused; also drops its guidance block
     "tts",             # text_to_speech
@@ -836,12 +835,19 @@ def write_agent_hermes_config(
         # clear a previously-written endpoint.
         if cdp_url is not None:
             browser_section["cdp_url"] = cdp_url
-        # Each task_id (the top-level agent AND every delegate_task sub-agent)
-        # gets its OWN tab in the shared Chrome instead of all adopting the
-        # first existing page. This is what lets sub-agents browse concurrently
-        # without hijacking each other's navigation, while still sharing the
-        # team's cookies/logins (one browser, many tabs). Honored by the patched
-        # browser_supervisor._attach_initial_page.
+        # INTENT: each task_id (top-level agent AND every delegate_task sub-agent)
+        # should get its OWN tab in the shared Chrome rather than all adopting the
+        # first existing page, so agents browsing concurrently don't hijack each
+        # other's navigation while still sharing the team's cookies/logins.
+        #
+        # ⚠ NOT HONORED by the installed Hermes (>=0.15.2): browser_supervisor.
+        # _attach_initial_page adopts the first page target unconditionally and
+        # never reads this key — there is no swarm monkeypatch applying it. We
+        # still WRITE the key so it activates automatically if/when Hermes (or an
+        # upstream patch) honors it; until then, two agents in a team that browse
+        # at the same time can land on the SAME tab. The real fix is upstream
+        # (Hermes honoring the flag) or a swarm-owned per-tab CDP handoff — both
+        # need concurrent-browser verification. Tracked as a known limitation.
         browser_section["fresh_tab_per_task"] = True
         existing["browser"] = browser_section
 

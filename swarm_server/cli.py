@@ -62,8 +62,12 @@ def cmd_doctor(args) -> int:
     ensure_hermes_importable()
     try:
         import run_agent  # noqa: F401
-        ver = getattr(__import__("hermes_constants", fromlist=["__version__"]), "__version__", "?")
-        print(f"✓ Hermes agent importable (hermes_constants {ver})")
+        try:
+            from importlib.metadata import version as _pkg_version
+            ver = _pkg_version("hermes-agent")
+        except Exception:
+            ver = "?"
+        print(f"✓ Hermes agent importable (hermes-agent {ver})")
     except Exception as e:
         ok = False
         print(f"✗ Hermes agent NOT importable: {e}")
@@ -128,6 +132,25 @@ def cmd_doctor(args) -> int:
             print("   → playwright install chromium")
     except Exception as e:
         print(f"⚠ Could not probe Chromium: {e}")
+
+    # 4) Hermes compat seams — the internal APIs the swarm builds over. Drift here
+    # (after a Hermes update) silently disables features, so surface it explicitly.
+    try:
+        from swarm_server.hermes_compat import run_self_check
+
+        report = run_self_check()
+        if report.ok:
+            print(f"✓ Hermes compat: {len(report.probes)}/{len(report.probes)} seams verified")
+        else:
+            for p in report.failures:
+                mark = "✗" if p.critical else "⚠"
+                print(f"{mark} Hermes seam '{p.name}': {p.detail}")
+            if report.critical_failures:
+                ok = False
+                print("   → a Hermes update likely moved an internal API; see "
+                      "swarm_server/hermes_compat.py")
+    except Exception as e:
+        print(f"⚠ Could not run Hermes compat self-check: {e}")
 
     print("\nResult:", "ready ✅" if ok else "issues above ⚠️")
     return 0 if ok else 1

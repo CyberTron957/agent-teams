@@ -170,6 +170,15 @@ async def lifespan(app: FastAPI):
     cfg = load_agents_config()
     loop = asyncio.get_running_loop()
 
+    # Verify the fragile Hermes seams the swarm depends on still hold in the
+    # installed Hermes. Warn-only: a Hermes update that moved an internal API
+    # should be LOUD here, never a silent feature regression nor a boot blocker.
+    try:
+        from swarm_server.hermes_compat import log_self_check
+        log_self_check()
+    except Exception as e:
+        log.warning("[Startup] Hermes compat self-check failed to run: %s", e)
+
     # Inherit the user's existing Hermes secrets (~/.hermes/.env) — provider AND
     # tool API keys (Firecrawl/Tavily/Exa/…) — into this process so every agent
     # can use them. Non-overriding, so explicit server/deployment env still wins.
