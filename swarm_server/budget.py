@@ -23,7 +23,7 @@ Design notes:
 import logging
 import threading
 import time
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 log = logging.getLogger("swarm.budget")
 
@@ -93,9 +93,12 @@ class TeamBudgetTracker:
 
     # -- public API ---------------------------------------------------------
     def record_turn(self, team_id: str, model: str,
-                    t_in: int, t_out: int, t_cache: int) -> None:
+                    t_in: int, t_out: int, t_cache: int,
+                    provider: Optional[str] = None,
+                    base_url: Optional[str] = None) -> None:
         """Meter one completed turn. Latches + broadcasts once when a team first
-        crosses its cap."""
+        crosses its cap. provider/base_url select native (Hermes) vs proxy (table)
+        pricing."""
         from swarm_server.model_config import estimate_cost_usd
         events = []
         newly_exceeded = False
@@ -104,7 +107,8 @@ class TeamBudgetTracker:
             b = self._bucket(team_id)
             b["turns"] += 1
             b["tokens"] += int(t_in) + int(t_out) + int(t_cache)
-            cost = estimate_cost_usd(model, t_in, t_out, t_cache)
+            cost = estimate_cost_usd(model, t_in, t_out, t_cache,
+                                     provider=provider, base_url=base_url)
             if cost is None:
                 b["unpriced_turns"] += 1
             else:
@@ -215,13 +219,14 @@ class TeamBudgetTracker:
                 agent = ev.get("agent_name") or "?"
                 team_id = agent_team.get(agent) or ev.get("team_id") or "default"
                 model = (data.get("model") or cfg_models.get(agent) or "").strip()
+                provider = (data.get("provider") or "").strip() or None
                 t_in = int(data.get("turn_input_tokens") or 0)
                 t_out = int(data.get("turn_output_tokens") or 0)
                 t_cache = int(data.get("turn_cache_read_tokens") or 0)
                 b = self._bucket(team_id)
                 b["turns"] += 1
                 b["tokens"] += t_in + t_out + t_cache
-                cost = estimate_cost_usd(model, t_in, t_out, t_cache)
+                cost = estimate_cost_usd(model, t_in, t_out, t_cache, provider=provider)
                 if cost is None:
                     b["unpriced_turns"] += 1
                 else:

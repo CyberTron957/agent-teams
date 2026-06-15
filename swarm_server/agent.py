@@ -362,9 +362,13 @@ class AgentDaemon:
         self._last_input_tokens = 0
         self._last_output_tokens = 0
         self._last_cache_read_tokens = 0
-        # Resolved model name (set in _ensure_agent) — logged with every
+        # Resolved model name + route (set in _ensure_agent) — logged with every
         # token_usage event so cost attribution survives mid-life model swaps.
+        # provider/base_url let the cost meter pick native (Hermes) vs proxy
+        # (swarm table) pricing per turn.
         self._current_model = ""
+        self._current_provider = ""
+        self._current_base_url = ""
         # 24/7 autonomy: when True, this daemon self-injects a continue-mission
         # task after AUTONOMOUS_HEARTBEAT_SECONDS of idle (empty queue). Set per
         # agent via cfg["autonomous"] — typically only the team coordinator.
@@ -625,6 +629,8 @@ class AgentDaemon:
                         "per-agent model in the dashboard, or set SWARM_LLM_* for a proxy."
                     )
                 self._current_model = model
+                self._current_provider = eff["provider"] or ""
+                self._current_base_url = eff["base_url"] or ""
                 _eff_base = eff["base_url"] or None
                 _eff_key = eff["api_key"] or None
                 _eff_provider = eff["provider"] or None
@@ -2357,6 +2363,7 @@ class AgentDaemon:
                     self.name, "token_usage",
                     data={
                         "model": self._current_model,
+                        "provider": self._current_provider,
                         "delta_tokens": delta,
                         "total_tokens": total,
                         "input_tokens": inp,
@@ -2372,7 +2379,8 @@ class AgentDaemon:
                 from swarm_server.budget import budget_tracker
                 budget_tracker.record_turn(
                     self.cfg.get("team_id", "default"), self._current_model,
-                    turn_in, turn_out, turn_cache)
+                    turn_in, turn_out, turn_cache,
+                    provider=self._current_provider, base_url=self._current_base_url)
             except Exception as e:
                 log.debug("[%s] token usage logging failed: %s", self.name, e)
 

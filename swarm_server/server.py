@@ -864,6 +864,7 @@ async def get_team_costs(team_id: str, hours: float = 24):
         except Exception:
             continue
         model = (data.get("model") or cfg_models.get(agent) or "").strip()
+        provider = (data.get("provider") or "").strip() or None
         if "turn_input_tokens" in data:
             t_in = int(data.get("turn_input_tokens") or 0)
             t_out = int(data.get("turn_output_tokens") or 0)
@@ -896,7 +897,7 @@ async def get_team_costs(team_id: str, hours: float = 24):
         a["cache_read_tokens"] += t_cache
         if model:
             a["model"] = model
-        cost = estimate_cost_usd(model, t_in, t_out, t_cache)
+        cost = estimate_cost_usd(model, t_in, t_out, t_cache, provider=provider)
         if cost is None:
             a["unpriced"] = True
         else:

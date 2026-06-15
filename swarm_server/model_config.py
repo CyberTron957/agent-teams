@@ -359,13 +359,14 @@ def resolve_model(agent_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Swarm-side pricing — USD per 1M tokens: (input, output, cached_input).
-# Hermes can't price models behind the LiteLLM proxy (its estimated_cost_usd
-# is always 0 there), so the /teams/{id}/costs endpoint prices the token
-# deltas with this map. cached_input None = provider reports no cached tier
-# (Azure-hosted DeepSeek/Kimi don't prompt-cache — verified empirically).
-# Keep in sync with the proxy's model_info blocks; LiteLLM's Postgres
-# SpendLogs remain the billing ground truth.
+# Swarm-side pricing for PROXY/custom models only — USD per 1M tokens:
+# (input, output, cached_input). Hermes can't price a model hidden behind a
+# LiteLLM alias (resolve_billing_route → billing_mode "unknown"), so the
+# /teams/{id}/costs endpoint prices those token deltas with this map. NATIVE
+# providers are priced by Hermes instead (see estimate_cost_usd), so they do NOT
+# belong here. cached_input None = provider reports no cached tier (Azure-hosted
+# DeepSeek/Kimi don't prompt-cache — verified empirically). Keep in sync with the
+# proxy's model_info blocks; LiteLLM's Postgres SpendLogs remain billing truth.
 # ---------------------------------------------------------------------------
 MODEL_PRICES_PER_MILLION: Dict[str, tuple] = {
     "litellm-model":      (0.19, 0.51, None),
@@ -376,17 +377,53 @@ MODEL_PRICES_PER_MILLION: Dict[str, tuple] = {
 }
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int,
-                      cache_read_tokens: int = 0) -> Optional[float]:
-    """Price a token bundle, or None for unknown models (the dashboard shows
-    'n/a' rather than a wrong number). input_tokens must EXCLUDE cached reads
-    (Hermes' canonical usage already subtracts them); cached reads are priced
-    at the cached tier, falling back to 10% of input price."""
-    prices = MODEL_PRICES_PER_MILLION.get((model or "").strip().lower())
-    if not prices:
+def _hermes_estimate_cost_usd(model, input_tokens, output_tokens,
+                              cache_read_tokens, cache_write_tokens,
+                              provider, base_url) -> Optional[float]:
+    """Defer pricing to Hermes' usage_pricing engine (precise per-model rates,
+    incl. cache tiers, kept fresh as Hermes ships models). None on any miss."""
+    try:
+        from agent.usage_pricing import estimate_usage_cost, CanonicalUsage
+        result = estimate_usage_cost(
+            model,
+            CanonicalUsage(
+                input_tokens=int(input_tokens), output_tokens=int(output_tokens),
+                cache_read_tokens=int(cache_read_tokens),
+                cache_write_tokens=int(cache_write_tokens),
+            ),
+            provider=provider, base_url=base_url or None,
+        )
+        amt = getattr(result, "amount_usd", None)
+        return float(amt) if amt is not None else None
+    except Exception:
         return None
-    p_in, p_out, p_cache = prices
-    if p_cache is None:
-        p_cache = p_in * 0.1
-    return (input_tokens * p_in + output_tokens * p_out
-            + cache_read_tokens * p_cache) / 1_000_000.0
+
+
+def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int,
+                      cache_read_tokens: int = 0, *, provider: Optional[str] = None,
+                      base_url: Optional[str] = None,
+                      cache_write_tokens: int = 0) -> Optional[float]:
+    """Price a token bundle in USD, or None for unknown models (the dashboard
+    shows 'n/a' rather than a wrong number). input_tokens must EXCLUDE cached
+    reads (Hermes' canonical usage already subtracts them).
+
+    Proxy/custom models are opaque to Hermes — it sees only an alias like
+    "litellm-model" behind the endpoint — so they're priced from the swarm table
+    below. For a NATIVE provider (the `hermes setup` path) Hermes prices
+    precisely, so we DEFER to it: that's how a native-provider user sees correct
+    costs without the swarm re-encoding every provider's price sheet (and without
+    the table going stale as new models ship)."""
+    prices = MODEL_PRICES_PER_MILLION.get((model or "").strip().lower())
+    if prices:
+        p_in, p_out, p_cache = prices
+        if p_cache is None:
+            p_cache = p_in * 0.1
+        return (input_tokens * p_in + output_tokens * p_out
+                + cache_read_tokens * p_cache) / 1_000_000.0
+    # Not a proxy-table model → defer to Hermes. Needs a real provider to resolve
+    # a billing route; "custom"/proxy and genuinely unknown models come back None.
+    if provider and (provider or "").lower() != "custom":
+        return _hermes_estimate_cost_usd(
+            model, input_tokens, output_tokens, cache_read_tokens,
+            cache_write_tokens, provider, base_url)
+    return None

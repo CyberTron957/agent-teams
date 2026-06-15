@@ -696,27 +696,40 @@ def write_agent_hermes_config(
         except Exception as e:
             log.warning("Could not parse existing %s (%s) — rewriting", cfg_path, e)
 
-    # Pin the model to the LiteLLM proxy. Beyond context_length, we set
-    # default/provider/base_url/api_key so Hermes' auxiliary client can resolve
-    # "the main model" (auxiliary_client._read_main_model + _resolve_custom_
-    # runtime) to this proxy instead of falling back to "gpt-4o-mini" (which the
-    # proxy doesn't serve) or to unauthenticated openrouter/nous.
-    # Effective backend: resolved by the caller (per-agent override → swarm
-    # default → legacy proxy). base_url present => OpenAI-compatible "custom"
-    # path; absent => a native provider (e.g. anthropic) Hermes resolves itself.
+    # ROUTE DECIDES HOW MUCH WE PIN. An OpenAI-compatible endpoint (LiteLLM proxy
+    # or any custom base_url) HIDES the real model from Hermes — it sees only an
+    # alias like "litellm-model" — so we must pin context_length, the auxiliary
+    # model, and vision ourselves (Hermes would otherwise guess a 256K window and
+    # resolve aux to an unauthenticated provider / phantom "gpt-4o-mini").
+    #
+    # A NATIVE provider (no base_url — e.g. anthropic/openai via `hermes setup`)
+    # is the opposite: Hermes KNOWS the model and resolves its real context window
+    # (model_metadata.get_model_context_length), a cheap per-provider auxiliary
+    # model (default_aux_model — e.g. claude-haiku), and native vision on its own.
+    # Pinning there is actively harmful (caps a 1M-context model at 256K; forces
+    # the full main model to do title-gen/compaction) AND freezes values Hermes
+    # keeps fresh as it ships new models. So on the native route we DEFER.
     eff_base = base_url if base_url is not None else LITELLM_API_BASE
     eff_key = api_key if api_key is not None else LLM_API_KEY
     eff_provider = provider or "custom"
+    on_openai_compatible = bool(eff_base)
+
     model_section = existing.get("model")
     if not isinstance(model_section, dict):
         model_section = {}
-    model_section["context_length"] = AGENT_CONTEXT_WINDOW
     model_section["default"] = model
     model_section["provider"] = eff_provider
-    if eff_base:
+    if on_openai_compatible:
+        # Endpoint hides the model → pin a conservative window. Below the real
+        # window only compacts sooner (safe); above it risks a hard overflow
+        # before Hermes ever compacts. Tune via SWARM/AGENT_CONTEXT_WINDOW.
+        model_section["context_length"] = AGENT_CONTEXT_WINDOW
         model_section["base_url"] = eff_base
-    elif "base_url" in model_section:
-        del model_section["base_url"]
+    else:
+        # Native provider → let Hermes resolve the real per-model window. Strip
+        # any stale pins from a previous proxy-route write (merge-safe).
+        model_section.pop("context_length", None)
+        model_section.pop("base_url", None)
     if eff_key:
         model_section["api_key"] = eff_key
     existing["model"] = model_section
@@ -732,54 +745,58 @@ def write_agent_hermes_config(
         "abort_on_summary_failure": False,
     }
 
-    # Route ALL auxiliary tasks (compaction summarizer, title-gen, web-extract,
-    # session search, etc.) through the LiteLLM proxy. Without this, provider
-    # "auto" tries openrouter then nous — both unauthenticated here — so the
-    # compaction SUMMARY call fails and Hermes re-attempts compaction in a tight
-    # loop (the 4 zero-message cascade sessions seen in the CMO's history).
-    # Setting base_url forces provider=custom and uses our model directly
-    # (auxiliary_client._resolve_aux_provider_and_model: base_url present =>
-    # provider forced to "custom"; per-task config wins over "auto").
-    aux_endpoint = {
-        "provider": eff_provider,
-        "model": model,
-    }
-    if eff_base:
-        aux_endpoint["base_url"] = eff_base
-    if eff_key:
-        aux_endpoint["api_key"] = eff_key
-    aux_section = existing.get("auxiliary")
-    if not isinstance(aux_section, dict):
-        aux_section = {}
-    for _task in (
+    # AUXILIARY tasks (compaction summarizer, title-gen, web-extract, vision, …).
+    _MANAGED_AUX_TASKS = (
         "compression", "title_generation", "web_extract",
         "session_search", "triage_specifier", "curator", "approval",
-    ):
-        task_cfg = aux_section.get(_task)
-        if not isinstance(task_cfg, dict):
-            task_cfg = {}
-        task_cfg.update(aux_endpoint)
-        aux_section[_task] = task_cfg
-    # The summarizer shares the main window; tell its feasibility check.
-    aux_section["compression"]["context_length"] = AGENT_CONTEXT_WINDOW
-    # Vision (browser_vision screenshot reading) is special: it MUST use a
-    # multimodal model. Prefer the agent's MAIN model when a one-time probe
-    # shows it actually reads images (one model, no extra hop); otherwise pin
-    # the dedicated vision model on the same proxy. Supplying both base_url AND
-    # api_key forces the deterministic "custom endpoint" branch in
-    # auxiliary_client.resolve_vision_provider_client, bypassing the capability
-    # heuristic that would otherwise drop to unauthenticated aggregators (Gemini/
-    # OpenRouter) and fail. Without this entry the "vision" task resolves to
-    # provider="auto" and browser_vision raises "No LLM provider configured".
-    # The probe needs an OpenAI-compatible endpoint; native providers (no
-    # base_url) skip it and keep the dedicated vision model.
-    vision_cfg = dict(aux_endpoint)
-    vision_cfg["model"] = (
-        resolve_screenshot_model(model, eff_base, eff_key)
-        if eff_base else get_vision_model()
     )
-    aux_section["vision"] = {**aux_section.get("vision", {}), **vision_cfg}
-    existing["auxiliary"] = aux_section
+    if on_openai_compatible:
+        # Pin every aux task to OUR endpoint. Without this, provider "auto" tries
+        # openrouter then nous — both unauthenticated here — so the compaction
+        # SUMMARY call fails and Hermes re-attempts compaction in a tight loop
+        # (the 4 zero-message cascade sessions seen in the CMO's history). Setting
+        # base_url forces provider=custom and uses our model directly
+        # (auxiliary_client._resolve_aux_provider_and_model: base_url present =>
+        # provider forced to "custom"; per-task config wins over "auto").
+        aux_endpoint = {"provider": eff_provider, "model": model}
+        aux_endpoint["base_url"] = eff_base
+        if eff_key:
+            aux_endpoint["api_key"] = eff_key
+        aux_section = existing.get("auxiliary")
+        if not isinstance(aux_section, dict):
+            aux_section = {}
+        for _task in _MANAGED_AUX_TASKS:
+            task_cfg = aux_section.get(_task)
+            if not isinstance(task_cfg, dict):
+                task_cfg = {}
+            task_cfg.update(aux_endpoint)
+            aux_section[_task] = task_cfg
+        # The summarizer shares the main window; tell its feasibility check.
+        aux_section["compression"]["context_length"] = AGENT_CONTEXT_WINDOW
+        # Vision (browser_vision screenshot reading) MUST use a multimodal model.
+        # Prefer the agent's MAIN model when a one-time probe shows it reads images
+        # (one model, no extra hop); otherwise pin the dedicated vision model on
+        # the same endpoint. Supplying both base_url AND api_key forces the
+        # deterministic "custom endpoint" branch in resolve_vision_provider_client,
+        # bypassing the capability heuristic that would otherwise drop to
+        # unauthenticated aggregators (Gemini/OpenRouter) and fail.
+        vision_cfg = dict(aux_endpoint)
+        vision_cfg["model"] = resolve_screenshot_model(model, eff_base, eff_key)
+        aux_section["vision"] = {**aux_section.get("vision", {}), **vision_cfg}
+        existing["auxiliary"] = aux_section
+    else:
+        # Native provider → DEFER: Hermes resolves a cheap per-provider auxiliary
+        # model (default_aux_model) and native vision on its own. Strip any aux
+        # pins a previous proxy-route write left behind so they don't force a
+        # stale endpoint (merge-safe; leaves any non-managed aux keys untouched).
+        aux_section = existing.get("auxiliary")
+        if isinstance(aux_section, dict):
+            for _task in (*_MANAGED_AUX_TASKS, "vision"):
+                aux_section.pop(_task, None)
+            if aux_section:
+                existing["auxiliary"] = aux_section
+            else:
+                existing.pop("auxiliary", None)
 
     # Pin ddgs (DuckDuckGo, no API key) as the web search backend so web_search
     # is always available and never silently falls through to an unconfigured
