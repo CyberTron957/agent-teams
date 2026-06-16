@@ -87,8 +87,12 @@ ensure_git() {
 }
 
 # Ensure "$PYBIN -m venv" works (Debian/Ubuntu split it into python3-venv).
+# Probe by actually creating a throwaway venv: on Debian `import ensurepip`
+# succeeds even when the package is missing — it's the pip bootstrap that fails.
+_venv_ok() { local p="${TMPDIR:-/tmp}/.hs_venvprobe.$$"; rm -rf "$p"
+  "$PYBIN" -m venv "$p" >/dev/null 2>&1; local r=$?; rm -rf "$p"; return $r; }
 ensure_py_venv() {
-  "$PYBIN" -c 'import ensurepip, venv' >/dev/null 2>&1 && return 0
+  _venv_ok && return 0
   local pyver pkg
   pyver="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo 3)"
   if [ -n "$_PKG" ]; then
@@ -96,7 +100,7 @@ ensure_py_venv() {
     for pkg in "python${pyver}-venv" python3-venv; do
       info "Python venv module missing — installing $pkg…"
       $_PKG "$pkg" >/dev/null 2>&1 || continue
-      "$PYBIN" -c 'import ensurepip, venv' >/dev/null 2>&1 && { info "venv module ready."; return 0; }
+      _venv_ok && { info "venv module ready."; return 0; }
     done
   fi
   die "Python's venv module is unavailable. Install it (e.g. sudo apt install python3-venv) and retry — or use Docker: docker compose up --build"
