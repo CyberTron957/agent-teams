@@ -98,6 +98,21 @@ fi
 PY="$VENV/bin/python"
 [ -x "$PY" ] || die "venv python missing at $PY"
 
+# Ensure pip is installed in the virtual environment
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  info "pip not found in venv; attempting to bootstrap it..."
+  if ! "$PY" -m ensurepip --default-pip >/dev/null 2>&1; then
+    info "ensurepip failed; downloading get-pip.py to bootstrap pip..."
+    if command -v curl >/dev/null 2>&1; then
+      curl -sSL https://bootstrap.pypa.io/get-pip.py | "$PY" >/dev/null 2>&1 || warn "Failed to bootstrap pip using curl."
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO- https://bootstrap.pypa.io/get-pip.py | "$PY" >/dev/null 2>&1 || warn "Failed to bootstrap pip using wget."
+    else
+      warn "Neither curl nor wget found; could not bootstrap pip."
+    fi
+  fi
+fi
+
 # ---- 3. install the package ----------------------------------------------
 step "Installing hermes-swarm (+ hermes-agent) — this can take a few minutes"
 "$PY" -m pip install --quiet --upgrade pip
