@@ -3,8 +3,11 @@
 FROM python:3.12-slim-bookworm
 
 # System deps: git for VCS, curl for healthchecks, Chromium deps for browser tools.
-# -o Acquire::Check-Valid-Until=false handles clock skew / repo freshness issues.
-RUN apt-get update -o Acquire::Check-Valid-Until=false \
+# Only use the main bookworm repo (skip -updates/-security which may have future
+# timestamps on some mirrors, causing "not valid yet" errors during Docker builds).
+RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm-main.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list \
+    && apt-get update -o Acquire::Check-Valid-Until=false \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git \
         # Chromium system dependencies
@@ -24,7 +27,9 @@ RUN pip install --no-cache-dir .
 # Try Playwright's bundled Chromium with pre-installed deps first.
 # If that fails, try system chromium package. If all fails, warn but continue.
 RUN python -m playwright install --with-deps chromium 2>/dev/null \
-    || (apt-get update -o Acquire::Check-Valid-Until=false \
+    || (echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm-main.list \
+        && rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list \
+        && apt-get update -o Acquire::Check-Valid-Until=false \
         && apt-get install -y --no-install-recommends chromium 2>/dev/null \
         && rm -rf /var/lib/apt/lists/*) \
     || echo "WARN: Chromium install failed — browser tools will be unavailable"
