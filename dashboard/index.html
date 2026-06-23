@@ -296,6 +296,15 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .empty-state-icon { font-size: 28px; margin-bottom: 10px; opacity: 0.35; }
 .agent-actions { display: flex; gap: 6px; margin-top: 9px; }
 
+/* ===== ONBOARDING TUTORIAL ===== */
+.onboarding-tutorial { padding: 18px; border: 1px dashed var(--border-strong); border-radius: var(--r-md); background: var(--bg-card); margin: 12px 14px; text-align: left; }
+.onboarding-tutorial h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: var(--tool); text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; }
+.onboarding-tutorial p { font-size: 12px; line-height: 1.5; color: var(--text-secondary); margin-bottom: 12px; }
+.onboarding-step { margin-bottom: 16px; padding: 12px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); }
+.onboarding-step:last-child { margin-bottom: 0; }
+.onboarding-step h4 { font-size: 12px; font-weight: 600; margin-bottom: 6px; color: var(--text); display: flex; align-items: center; gap: 6px; }
+.onboarding-step p { font-size: 11px; line-height: 1.4; color: var(--text-muted); margin-bottom: 10px; }
+
 /* ===== INBOX ===== */
 .inbox-panel { position: fixed; top: 0; right: -440px; width: 420px; max-width: 92vw; bottom: 0; background: var(--bg-raised); border-left: 1px solid var(--border-strong); z-index: 150; transition: right 0.32s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; box-shadow: -30px 0 80px -40px rgba(0,0,0,0.9); }
 .inbox-panel.open { right: 0; }
@@ -1362,7 +1371,27 @@ function renderCardDigest(digest) {
 function renderAgents() {
     const names = Object.keys(agentData).sort();
     const el = document.getElementById('agent-list');
-    if (!names.length) { el.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('search', 26)}</div><div>No agents in this team</div></div>`; return; }
+    if (!currentTeam) {
+        el.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('search', 26)}</div><div>Select a team</div></div>`;
+        return;
+    }
+    if (!names.length) {
+        el.innerHTML = `<div class="onboarding-tutorial">
+            <h3>${icon('compass', 14)} Get Started</h3>
+            <p>Welcome! Your swarm has no agents yet. You can build your team in two ways:</p>
+            <div class="onboarding-step">
+                <h4>${icon('compass', 12)} 1. Chat with the Architect</h4>
+                <p>Chat with the Architect to specify your requirements, and let it design and build your agent team automatically.</p>
+                <button class="btn btn-sm btn-success" style="width: 100%" onclick="openMaster()">${icon('compass', 12)} Chat with Architect</button>
+            </div>
+            <div class="onboarding-step">
+                <h4>${icon('plus', 12)} 2. Create Manually</h4>
+                <p>Create agents manually by clicking the <strong>+ Add</strong> button at the top of this panel to specify their roles and links.</p>
+                <button class="btn btn-sm btn-secondary" style="width: 100%" onclick="showAddAgent()">${icon('plus', 12)} Create Manually</button>
+            </div>
+        </div>`;
+        return;
+    }
     el.innerHTML = names.map(n => {
         const a = agentData[n]; const st = a.state || 'idle'; const sel = selectedAgent === n;
         const peers = a.config?.allowed_peers || [];
@@ -2561,6 +2590,7 @@ const ICONS = {
     'pause': '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
     'square': '<rect x="5" y="5" width="14" height="14" rx="2"/>',
     'ban': '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+    'plus': '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
 };
 
 function icon(name, size = 14) {

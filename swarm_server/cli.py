@@ -397,7 +397,7 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_init(args) -> int:
-    """Scaffold a starter team + one autonomous coordinator agent.
+    """Scaffold a starter team. Optionally creates a coordinator agent if --agent is specified.
 
     No-op-safe: skips anything that already exists so it can be re-run.
     """
@@ -418,6 +418,10 @@ def cmd_init(args) -> int:
         print(f"• Team '{team_id}' already exists")
 
     agent_id = args.agent
+    if not agent_id:
+        print("\nNext: `hermes-swarm up` and open the dashboard.")
+        return 0
+
     if agent_id in cfg["agents"]:
         print(f"• Agent '{agent_id}' already exists — nothing to do")
         return 0
@@ -511,11 +515,11 @@ def main(argv=None) -> int:
     doc = sub.add_parser("doctor", help="Check Hermes, model backend, and Chromium")
     doc.set_defaults(func=cmd_doctor)
 
-    init = sub.add_parser("init", help="Scaffold a starter team + coordinator agent")
+    init = sub.add_parser("init", help="Scaffold a starter team")
     init.add_argument("--team", default="default", help="team id (slug)")
     init.add_argument("--team-name", default=None, help="team display name")
-    init.add_argument("--agent", default="coordinator", help="agent id (slug)")
-    init.add_argument("--agent-name", default=None, help="agent display name")
+    init.add_argument("--agent", default=None, help="agent id (slug) to create (optional)")
+    init.add_argument("--agent-name", default=None, help="agent display name (optional)")
     init.set_defaults(func=cmd_init)
 
     sm = sub.add_parser("set-model",
