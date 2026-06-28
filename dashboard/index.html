@@ -1976,6 +1976,14 @@ function scheduleExecRender() {
 function renderExecTrace() {
     const container = document.getElementById('exec-trace');
     if (!container) return;
+
+    // Reset the DOM when the shown agent changes, so a fresh turn animates in
+    // cleanly instead of reconciling one agent's steps into another's nodes.
+    if (container.dataset.agent !== (selectedAgent || '')) {
+        container.innerHTML = '';
+        container.dataset.agent = selectedAgent || '';
+    }
+
     if (!selectedAgent) {
         container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('zap', 26)}</div><div>Select an agent</div></div>`;
         return;
@@ -1987,29 +1995,70 @@ function renderExecTrace() {
         container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('zap', 26)}</div><div>Idle — the next turn will stream here live (thinking → tools → answer).</div></div>`;
         return;
     }
-    let html = '';
-    steps.forEach(s => {
+
+    // Build the desired list of keyed items. Keys are stable across renders:
+    // the steps array is append-only (the last reasoning box grows in place and
+    // tool results fill in), so step index is a stable identity.
+    const items = [];
+    steps.forEach((s, i) => {
+        const key = 's' + i;
         if (s.type === 'system') {
-            html += `<div class="exec-step sysmsg"><button class="bare exec-label" aria-expanded="false" onclick="toggleNext(this)">${icon('settings', 11)} System context · click to expand</button><pre class="collapsed" style="max-height:200px">${esc(s.text)}</pre></div>`;
+            items.push({ key, className: 'exec-step sysmsg', inner: `<button class="bare exec-label" aria-expanded="false" onclick="toggleNext(this)">${icon('settings', 11)} System context · click to expand</button><pre class="collapsed" style="max-height:200px">${esc(s.text)}</pre>` });
         } else if (s.type === 'user') {
-            html += `<div class="exec-step usermsg"><div class="exec-label">${icon('user', 11)} User / Task</div><pre>${esc(s.text)}</pre></div>`;
+            items.push({ key, className: 'exec-step usermsg', inner: `<div class="exec-label">${icon('user', 11)} User / Task</div><pre>${esc(s.text)}</pre>` });
         } else if (s.type === 'reasoning') {
-            html += `<div class="exec-step reasoning"><div class="exec-label">${icon('brain', 11)} Thinking</div><div class="md">${mdToHtml(s.text)}</div></div>`;
+            items.push({ key, className: 'exec-step reasoning', inner: `<div class="exec-label">${icon('brain', 11)} Thinking</div><div class="md">${mdToHtml(s.text)}</div>` });
         } else if (s.type === 'tool') {
             const obs = s.result != null
                 ? `<div class="exec-obs"><strong>↳ Output</strong><pre>${esc(s.result)}</pre></div>`
                 : '<div class="exec-obs"><em style="color:var(--text-muted)">running…</em></div>';
-            html += `<div class="exec-step tool"><div class="exec-label">${icon('wrench', 11)} Tool Call · ${esc(s.name || 'tool')}</div><pre>${esc(s.args)}</pre>${obs}</div>`;
+            items.push({ key, className: 'exec-step tool', inner: `<div class="exec-label">${icon('wrench', 11)} Tool Call · ${esc(s.name || 'tool')}</div><pre>${esc(s.args)}</pre>${obs}` });
         }
     });
     if (answer) {
-        html += `<div class="exec-step answer"><div class="exec-label">${icon('pen', 11)} Response</div><div class="md" style="margin-top:6px;word-break:break-word">${mdToHtml(answer)}</div></div>`;
+        items.push({ key: 'answer', className: 'exec-step answer', inner: `<div class="exec-label">${icon('pen', 11)} Response</div><div class="md" style="margin-top:6px;word-break:break-word">${mdToHtml(answer)}</div>` });
     }
     if (status) {
-        html += `<div class="exec-status"><span class="live-dot"></span>${esc(status)}</div>`;
+        items.push({ key: 'status', className: 'exec-status', inner: `<span class="live-dot"></span>${esc(status)}` });
     }
-    container.innerHTML = html;
-    container.scrollTop = container.scrollHeight;
+
+    // Only autoscroll if the user is already near the bottom, so updating in
+    // place doesn't yank someone who scrolled up to read an earlier step.
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 60;
+
+    // Reconcile keyed nodes instead of rebuilding innerHTML. NEW keys are
+    // created and inserted — so .exec-step's slideIn entrance animation plays
+    // exactly ONCE per step. EXISTING nodes are updated in place (only when
+    // their content actually changed) and never re-inserted, so they never
+    // replay the animation. This is the flicker fix: the old full innerHTML
+    // rebuild re-ran slideIn on every node on every ~80ms streamed-token batch,
+    // which read as the whole panel flashing during inference.
+    const existing = new Map();
+    for (const ch of Array.from(container.children)) {
+        if (ch.dataset.k) existing.set(ch.dataset.k, ch);
+        else container.removeChild(ch);   // drop a leftover empty-state node
+    }
+    let prev = null;
+    for (const item of items) {
+        let node = existing.get(item.key);
+        if (node) {
+            existing.delete(item.key);
+            if (node.className !== item.className) node.className = item.className;
+            if (node._inner !== item.inner) { node.innerHTML = item.inner; node._inner = item.inner; }
+        } else {
+            node = document.createElement('div');
+            node.dataset.k = item.key;
+            node.className = item.className;
+            node.innerHTML = item.inner;
+            node._inner = item.inner;
+        }
+        const ref = prev ? prev.nextSibling : container.firstChild;
+        if (node !== ref) container.insertBefore(node, ref);
+        prev = node;
+    }
+    for (const node of existing.values()) container.removeChild(node);
+
+    if (nearBottom) container.scrollTop = container.scrollHeight;
 }
 
 /* ===== AGENT CONFIG ===== */
@@ -3378,7 +3427,7 @@ function renderInbox() {
               const ts = new Date(n.timestamp * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
               return `<div class="inbox-item answered">
                   <div class="inbox-item-header"><span class="inbox-item-agent">${esc(n.title)}</span><span class="inbox-item-status">${ts}</span></div>
-                  <div class="inbox-item-question">${esc(n.body)}</div>
+                  <div class="inbox-item-question md">${mdToHtml(n.body)}</div>
               </div>`;
           }).join('')
         : '';
@@ -3415,7 +3464,7 @@ function renderInbox() {
         const statusClass = q.status;
         let responseHtml = '';
         if (q.response) {
-            responseHtml = `<div class="inbox-item-response"><strong>Response:</strong> ${esc(q.response)}</div>`;
+            responseHtml = `<div class="inbox-item-response"><strong>Response:</strong><div class="md" style="margin-top:4px">${mdToHtml(q.response)}</div></div>`;
         }
         let actionHtml = '';
         if (q.status === 'pending') {
@@ -3431,7 +3480,7 @@ function renderInbox() {
                     <span class="inbox-item-agent">${esc(agentData[q.agent_name]?.config?.name || q.agent_name)}</span>
                     <span class="inbox-item-status">${statusLabel} &middot; ${ts}</span>
                 </div>
-                <div class="inbox-item-question">${esc(q.question)}</div>
+                <div class="inbox-item-question md">${mdToHtml(q.question)}</div>
                 ${responseHtml}
                 ${actionHtml}
             </div>
