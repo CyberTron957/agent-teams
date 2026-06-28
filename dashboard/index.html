@@ -2419,13 +2419,20 @@ function onSetupProviderChange() {
     const p = setupProviders.find(x => x.id === pid) || {};
     const group = document.getElementById('setup-baseurl-group');
     const baseInput = document.getElementById('setup-baseurl');
-    if (p.openai_compatible === false) {       // native provider (e.g. Anthropic)
+    const native = p.openai_compatible === false;
+    // Hide the base-URL field only for native providers Hermes already knows the
+    // endpoint for (Anthropic, OpenAI, Gemini, …). Show it for OpenAI-compatible
+    // providers AND for any native provider that ships no default endpoint and so
+    // REQUIRES the operator to supply one (e.g. Azure Foundry → otherwise you're
+    // left with just key + model and nowhere to enter the endpoint).
+    if (native && !p.needs_base_url) {
         group.style.display = 'none';
         baseInput.value = '';
+        baseInput.readOnly = false;
     } else {
         group.style.display = '';
         baseInput.value = p.base_url || '';
-        baseInput.readOnly = !p.needs_base_url;  // editable only for "custom"
+        baseInput.readOnly = !p.needs_base_url;  // editable for custom / endpoint-less providers
     }
     document.getElementById('setup-model-list').innerHTML = (p.models || []).map(m => `<option value="${escAttr(m)}">`).join('');
     const modelInput = document.getElementById('setup-model');
@@ -2446,7 +2453,13 @@ async function saveSetupModel() {
     const model = document.getElementById('setup-model').value.trim();
     const base_url = document.getElementById('setup-baseurl').value.trim();
     const api_key = document.getElementById('setup-key').value.trim();
+    const p = setupProviders.find(x => x.id === provider) || {};
     if (!model) { document.getElementById('setup-error').textContent = 'Enter a model id.'; return; }
+    // Providers that ship no default endpoint (Azure Foundry, Custom) can't route
+    // without a base URL — the field is shown for them, so require it here.
+    if (p.needs_base_url && !base_url) {
+        document.getElementById('setup-error').textContent = 'Enter the API base URL for this provider.'; return;
+    }
     await postSetup({ provider, model, base_url, api_key });
 }
 

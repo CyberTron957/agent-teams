@@ -169,7 +169,11 @@ def build_provider_presets() -> List[Dict[str, Any]]:
                 "key_env": keys[0] if keys else "",
                 "auth_type": getattr(pc, "auth_type", "api_key"),
                 "openai_compatible": pid in _OPENAI_COMPATIBLE,
-                "needs_base_url": False,
+                # A provider that ships no default endpoint (e.g. Azure Foundry,
+                # which exposes AZURE_FOUNDRY_BASE_URL) REQUIRES the operator to
+                # supply one. Flag it so the setup UI shows + requires the base
+                # URL field instead of leaving only key + model.
+                "needs_base_url": not (getattr(pc, "inference_base_url", "") or ""),
                 "models": list(_PM.get(pid, []))[:8],
             })
         registry_ok = True
