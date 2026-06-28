@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-swarm"
-version = "0.4.0"
+version = "0.4.1"
 description = "P2P multi-agent swarm server with a real-time dashboard, powered by the Hermes agent."
 readme = "README.md"
 requires-python = ">=3.11"
