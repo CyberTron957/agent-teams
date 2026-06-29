@@ -151,14 +151,14 @@ def _resolve_data_root() -> Path:
     """Writable state dir (configs, queues, workspaces, monitoring db).
 
     SWARM_DATA_DIR wins (Docker sets it to a mounted volume). Otherwise the repo's
-    ./data in a source checkout, else ~/.hermes-swarm/data for a pip install (never
+    ./data in a source checkout, else ~/.agent-teams/data for a pip install (never
     write inside site-packages)."""
     env = os.environ.get("SWARM_DATA_DIR")
     if env:
         return Path(env).expanduser()
     if _is_source_checkout():
         return PROJECT_ROOT / "data"
-    return Path.home() / ".hermes-swarm" / "data"
+    return Path.home() / ".agent-teams" / "data"
 
 
 def _resolve_dashboard_dir() -> Path:
@@ -169,7 +169,7 @@ def _resolve_dashboard_dir() -> Path:
     for cand in (
         PROJECT_ROOT / "dashboard",                                  # source / Docker
         Path(__file__).resolve().parent / "dashboard",              # bundled in-package
-        Path(_sys.prefix) / "share" / "hermes-swarm" / "dashboard",  # pip data-files
+        Path(_sys.prefix) / "share" / "agent-teams" / "dashboard",  # pip data-files
     ):
         if (cand / "index.html").exists():
             return cand
@@ -341,7 +341,7 @@ TOOL_RESULT_AGE_KEEP_MESSAGES = int(os.environ.get("SWARM_TOOL_RESULT_AGE_KEEP_M
 TOOL_RESULT_AGE_MIN_CHARS = int(os.environ.get("SWARM_TOOL_RESULT_AGE_MIN_CHARS", "600"))
 TOOL_RESULT_AGE_QUANTUM = int(os.environ.get("SWARM_TOOL_RESULT_AGE_QUANTUM", "20"))
 
-# At `hermes-swarm up`, if local git HEAD is behind `main`, upgrade in place and
+# At `agent-teams up`, if local git HEAD is behind `main`, upgrade in place and
 # re-exec BEFORE agents start (never interrupts in-flight work). ON by default so
 # fixes pushed to `main` reach every install on its next start with no user action;
 # set SWARM_AUTO_UPDATE=0 (or false/no) to opt out. No-op inside Docker (the image

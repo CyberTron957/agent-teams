@@ -1,6 +1,6 @@
 <div align="center">
 
-# Hermes Swarm
+# Agent Teams
 
 **Mission control for a self-hosted swarm of AI agents.**
 
@@ -12,7 +12,7 @@ real-time console to command them.
 
 </div>
 
-![The Hermes Swarm dashboard - agent roster, supervisor/peer graph, live message history, and cost tracking](assets/dashboard.png)
+![The Agent Teams dashboard - agent roster, supervisor/peer graph, live message history, and cost tracking](assets/dashboard.png)
 
 ## Quick start
 
@@ -24,40 +24,40 @@ real-time console to command them.
 <summary><b>📋 Local install prompt</b> — set it up on this machine</summary>
 
 ```text
-Install and run Hermes Swarm on this machine for me.
+Install and run Agent Teams on this machine for me.
 
-Hermes Swarm (https://github.com/CyberTron957/hermes-mission-control) is a
+Agent Teams (https://github.com/CyberTron957/hermes-mission-control) is a
 self-hosted multi-agent server with a real-time dashboard.
 
 1. Check Python 3.11+ (or Docker). If missing, tell me before installing system packages.
-2. If ./hermes-swarm doesn't exist, clone the repo there. Run the installer
+2. If ./agent-teams doesn't exist, clone the repo there. Run the installer
    non-interactively: `bash install.sh --no-run`. It auto-skips the interactive
    wizard when there's no TTY, so it won't hang. (Add `--no-browser` only if the
    Chromium download fails — everything else still works.)
-3. Check whether a provider is already configured — run `.venv/bin/hermes-swarm doctor`.
+3. Check whether a provider is already configured — run `.venv/bin/agent-teams doctor`.
    If it already shows a model (e.g. an existing `~/.hermes` setup), ADOPT IT —
    don't ask me for keys, the swarm reuses it automatically. Skip to step 5.
 4. Only if NO provider is configured, ask me for:
      - provider (e.g. openai, anthropic, or "custom" for an OpenAI-compatible / proxy endpoint)
      - model name, API key, and base URL (base URL only for custom/proxy, e.g. http://localhost:4000/v1)
    Then set it with the supported NON-interactive command (do NOT edit Python internals):
-     .venv/bin/hermes-swarm set-model --provider <p> --model <m> [--base-url <url>] --api-key <key>
+     .venv/bin/agent-teams set-model --provider <p> --model <m> [--base-url <url>] --api-key <key>
    Then tell me that `set-model` only sets the model — for web-search, vision,
    browser providers, memory, and reasoning-effort customization I can run the
-   full wizard myself anytime: `.venv/bin/hermes-swarm setup`. Offer to run it.
-5. Verify: `.venv/bin/hermes-swarm doctor` (a "backend not reachable" warning is
+    full wizard myself anytime: `.venv/bin/agent-teams setup`. Offer to run it.
+5. Verify: `.venv/bin/agent-teams doctor` (a "backend not reachable" warning is
    fine if my model server isn't running yet).
 6. Scaffold a team and start the server detached:
-     .venv/bin/hermes-swarm init
-     .venv/bin/hermes-swarm up --detach   # daemonizes and returns; don't background it yourself
-   It prints the URL once /health is up. Confirm with `.venv/bin/hermes-swarm status`.
-   (Use `up --detach`, NOT `nohup … &` — backgrounding it from your shell means it
-   dies when your session/process group ends.)
+     .venv/bin/agent-teams init
+      .venv/bin/agent-teams up --detach   # daemonizes and returns; don't background it yourself
+    It prints the URL once /health is up. Confirm with `.venv/bin/agent-teams status`.
+    (Use `up --detach`, NOT `nohup … &` — backgrounding it from your shell means it
+    dies when your session/process group ends.)
 7. Tell me how to manage it and build my first team:
-     - open the dashboard at http://127.0.0.1:8000 and use the Architect
-     - check status:  .venv/bin/hermes-swarm status
-     - stop it:       .venv/bin/hermes-swarm down
-     - customize more: .venv/bin/hermes-swarm setup
+      - open the dashboard at http://127.0.0.1:8000 and use the Architect
+      - check status:  .venv/bin/agent-teams status
+      - stop it:       .venv/bin/agent-teams down
+      - customize more: .venv/bin/agent-teams setup
 
 Keep my API key local — don't commit it or send it anywhere.
 ```
@@ -68,9 +68,9 @@ Keep my API key local — don't commit it or send it anywhere.
 <summary><b>📋 VPS install prompt</b> — deploy it on a server, exposed safely</summary>
 
 ```text
-Deploy Hermes Swarm on this VPS, exposed safely over HTTPS.
+Deploy Agent Teams on this VPS, exposed safely over HTTPS.
 
-Hermes Swarm (https://github.com/CyberTron957/hermes-mission-control) is a
+Agent Teams (https://github.com/CyberTron957/hermes-mission-control) is a
 self-hosted multi-agent server. Its agents can run terminal commands as the
 server user, so containment and auth matter. Please:
 
@@ -109,14 +109,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CyberTron957/hermes-mission-
 
 ```bash
 # Docker
-git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm
-docker compose run --rm swarm hermes-swarm setup  
+git clone https://github.com/CyberTron957/hermes-mission-control agent-teams && cd agent-teams
+docker compose run --rm swarm agent-teams setup  
 docker compose up --build
 ```
 or
 ```bash
 # From a clone 
-git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm
+git clone https://github.com/CyberTron957/hermes-mission-control agent-teams && cd agent-teams
 bash install.sh
 ```
 
@@ -206,7 +206,7 @@ bash install.sh
 
 **Deployment & operations**
 - One-command `install.sh`, Docker + compose, or pip - whichever fits your machine.
-- A `hermes-swarm` CLI (`up` foreground/detached, `down`, `status`, `setup`, `set-model`, `init`, `doctor`) where `doctor` pinpoints a bad
+- A \`agent-teams\` CLI (\`up\` foreground/detached, \`down\`, \`status\`, \`setup\`, \`set-model\`, \`init\`, \`doctor\`) where \`doctor\` pinpoints a bad
   install (Hermes, model, Chromium, compat seams).
 - A systemd unit example, stdout logs, and optional on-disk rotating logs
   (`SWARM_LOG_FILE`).

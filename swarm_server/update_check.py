@@ -1,4 +1,4 @@
-"""Version-update detection for self-hosted Hermes Swarm installs.
+"""Version-update detection for self-hosted Agent Teams installs.
 
 The supported installs both track the GitHub ``main`` branch — the ``curl|bash``
 installer git-clones + ``pip install -e .``, and Docker builds from the same
@@ -62,7 +62,7 @@ def _upgrade_hint(method: str) -> str:
     if method == "docker":
         return "git pull && docker compose build --pull && docker compose up -d"
     # git / unknown
-    return "hermes-swarm update   (git pull --ff-only + pip install -e .)"
+    return "agent-teams update   (git pull --ff-only + pip install -e .)"
 
 
 def fetch_latest_version(timeout: float = 4.0) -> Optional[str]:

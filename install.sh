@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Hermes Swarm — one-command installer.
+# Agent Teams — one-command installer.
 #
 # Checks your machine, installs the swarm the best local way, and gets a
 # provider configured — adopting an existing Hermes (~/.hermes) if you have one,
@@ -15,7 +15,7 @@
 # Works two ways:
 #   • from a clone:   bash install.sh
 #   • from the web:   bash <(curl -fsSL <raw-url>/install.sh)     # clones first
-# When run from the web it clones into ./hermes-swarm (override: HERMES_SWARM_DIR).
+# When run from the web it clones into ./agent-teams (override: HERMES_SWARM_DIR).
 #
 # Usage:
 #   bash install.sh [--no-run] [--no-setup] [--no-browser] [--yes]
@@ -90,7 +90,7 @@ ensure_git() {
     _pkg_install git || true
   fi
   command -v git >/dev/null 2>&1 && { info "git installed."; return 0; }
-  die "git is required to fetch hermes-swarm. Install it (e.g. sudo apt install git) and retry."
+  die "git is required to fetch agent-teams. Install it (e.g. sudo apt install git) and retry."
 }
 
 ensure_curl() {
@@ -128,7 +128,7 @@ ensure_py_venv() {
 # Run from a checkout → use it. Piped from the web (no checkout) → clone first,
 # then continue from inside the clone.
 REPO_URL="${HERMES_SWARM_REPO:-https://github.com/CyberTron957/hermes-mission-control.git}"
-_in_repo() { [ -f "$1/pyproject.toml" ] && grep -q 'name *= *"hermes-swarm"' "$1/pyproject.toml" 2>/dev/null; }
+_in_repo() { [ -f "$1/pyproject.toml" ] && grep -q 'name *= *"agent-teams"' "$1/pyproject.toml" 2>/dev/null; }
 
 _self_dir=""
 case "$0" in */*) _self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" ;; esac
@@ -139,12 +139,12 @@ elif _in_repo "$PWD"; then
 else
   ensure_git                                        # auto-installs git on a fresh machine
   ensure_curl                                       # auto-installs curl on a fresh machine
-  TARGET="${HERMES_SWARM_DIR:-$PWD/hermes-swarm}"
+  TARGET="${HERMES_SWARM_DIR:-$PWD/agent-teams}"
   if _in_repo "$TARGET"; then
     step "Updating existing clone at $TARGET"
     git -C "$TARGET" pull --ff-only 2>/dev/null || warn "couldn't fast-forward; using the existing clone."
   else
-    step "Fetching hermes-swarm → $TARGET"
+    step "Fetching agent-teams → $TARGET"
     git clone --depth 1 "$REPO_URL" "$TARGET" || die "git clone failed ($REPO_URL)."
   fi
   cd "$TARGET"
@@ -199,14 +199,14 @@ if ! "$PY" -m pip --version >/dev/null 2>&1; then
 fi
 
 # ---- 3. install the package ----------------------------------------------
-step "Installing hermes-swarm (+ hermes-agent) — this can take a few minutes"
+step "Installing agent-teams (+ hermes-agent) — this can take a few minutes"
 "$PY" -m pip install --quiet --upgrade pip
-if [ -f pyproject.toml ] && grep -q 'name *= *"hermes-swarm"' pyproject.toml; then
+if [ -f pyproject.toml ] && grep -q 'name *= *"agent-teams"' pyproject.toml; then
   info "Editable install from this repo (pip install -e .)"
   "$PY" -m pip install -e .          # editable → no stale shadow copy
 else
-  info "Installing from PyPI (pip install hermes-swarm)"
-  "$PY" -m pip install hermes-swarm
+  info "Installing from PyPI (pip install agent-teams)"
+  "$PY" -m pip install agent-teams
 fi
 HV="$("$PY" -c 'from importlib.metadata import version; print(version("hermes-agent"))' 2>/dev/null || echo '?')"
 info "hermes-agent $HV installed."
@@ -259,20 +259,20 @@ if [ -n "${SWARM_SETUP_MODEL:-}" ]; then
   # Non-interactive config for AI-agent / CI / headless installs. Set:
   #   SWARM_SETUP_MODEL=...  [SWARM_SETUP_PROVIDER=...]  [SWARM_SETUP_BASE_URL=...]  [SWARM_SETUP_API_KEY=...]
   info "Configuring provider from SWARM_SETUP_* env (non-interactive)…"
-  "$VENV/bin/hermes-swarm" set-model \
+  "$VENV/bin/agent-teams" set-model \
     ${SWARM_SETUP_PROVIDER:+--provider "$SWARM_SETUP_PROVIDER"} \
     --model "$SWARM_SETUP_MODEL" \
     ${SWARM_SETUP_BASE_URL:+--base-url "$SWARM_SETUP_BASE_URL"} \
     ${SWARM_SETUP_API_KEY:+--api-key "$SWARM_SETUP_API_KEY"} \
-    || warn "set-model failed — configure later with: $VENV/bin/hermes-swarm set-model --help"
+    || warn "set-model failed — configure later with: $VENV/bin/agent-teams set-model --help"
 elif is_configured; then
   # Detect WHICH home already has a model so the message is honest about what we
   # adopted (a personal `hermes setup` in ~/.hermes, or a prior swarm default).
   _src="$("$PY" -c 'from swarm_server.model_config import get_default_model, detect_global_hermes_model as g; import sys; sys.stdout.write("swarm default (data/.hermes-shared)" if get_default_model().get("model") else ("your existing ~/.hermes setup" if g().get("model") else "?"))' 2>/dev/null || echo '?')"
   info "Provider already configured — adopting $_src. Nothing to do."
-  info "(Reconfigure or add tool keys anytime with: $VENV/bin/hermes-swarm setup)"
+  info "(Reconfigure or add tool keys anytime with: $VENV/bin/agent-teams setup)"
 elif [ "$NO_SETUP" -eq 1 ] || [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
-  warn "No provider configured. Set one non-interactively:  $VENV/bin/hermes-swarm set-model --model <m> [--base-url <url>] [--api-key <k>]"
+  warn "No provider configured. Set one non-interactively:  $VENV/bin/agent-teams set-model --model <m> [--base-url <url>] [--api-key <k>]"
   warn "…or run the interactive wizard:  $VENV/bin/hermes setup"
 else
   info "No provider configured — launching Hermes' setup wizard (40+ providers)…"
@@ -280,19 +280,19 @@ else
 fi
 
 # ---- 6. verify ------------------------------------------------------------
-step "Verifying (hermes-swarm doctor)"
-"$VENV/bin/hermes-swarm" doctor || warn "doctor flagged issues above — resolve them before starting."
+step "Verifying (agent-teams doctor)"
+"$VENV/bin/agent-teams" doctor || warn "doctor flagged issues above — resolve them before starting."
 
 # ---- 7. scaffold a starter team (no-op-safe) ------------------------------
 step "Scaffolding a starter team"
-"$VENV/bin/hermes-swarm" init || warn "init skipped (see above)."
+"$VENV/bin/agent-teams" init || warn "init skipped (see above)."
 
 # ---- 8. expose binaries to user PATH --------------------------------------
 step "Exposing commands to user PATH"
 if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
-  ln -sf "$VENV/bin/hermes-swarm" "$HOME/.local/bin/hermes-swarm"
+  ln -sf "$VENV/bin/agent-teams" "$HOME/.local/bin/agent-teams"
   ln -sf "$VENV/bin/hermes" "$HOME/.local/bin/hermes"
-  info "Symlinked hermes-swarm and hermes to $HOME/.local/bin"
+  info "Symlinked agent-teams and hermes to $HOME/.local/bin"
 
   # Ensure $HOME/.local/bin is in PATH in ~/.bashrc, ~/.zshrc, or ~/.profile if it's not already
   for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
@@ -309,7 +309,7 @@ fi
 
 # ---- done: start now, or print the one command to do it -------------------
 # Absolute paths so they work from any shell (e.g. after a web-bootstrap clone).
-START_CMD="$VENV/bin/hermes-swarm up"
+START_CMD="$VENV/bin/agent-teams up"
 printf "%s" "$G"
 cat << "EOF"
 
@@ -321,11 +321,11 @@ cat << "EOF"
  |_|  |_|\___|_|  |_| |_| |_|\___||___/|_____/  \_/\_/ \__,_|_|  |_| |_| |_|   
 
     Commands:
-      • Start Swarm:  hermes-swarm up
-      • Stop Swarm:        hermes-swarm down
-      • Check Status:      hermes-swarm status
-      • Configuration:     hermes-swarm setup
-      • Swarm Doctor:      hermes-swarm doctor
+      • Start:  agent-teams up
+      • Stop:        agent-teams down
+      • Status:      agent-teams status
+      • Config:      agent-teams setup
+      • Doctor:      agent-teams doctor
 
 EOF
 printf "%s" "$X"
@@ -336,6 +336,6 @@ if [ "$NO_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
   read -r _ans
   case "${_ans:-y}" in
     [Nn]*) info "Not started — run the command above when you're ready." ;;
-    *)     step "Starting (Ctrl-C to stop)"; exec "$VENV/bin/hermes-swarm" up ;;
+    *)     step "Starting (Ctrl-C to stop)"; exec "$VENV/bin/agent-teams" up ;;
   esac
 fi

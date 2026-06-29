@@ -1,0 +1,48 @@
+# systemd unit for a bare-metal Agent Teams deployment.
+#
+# Install:
+#   1. Create a dedicated user + data dir:
+#        sudo useradd --system --create-home --home-dir /var/lib/agent-teams hermes
+#   2. Install the package into a venv owned by that user (or system-wide):
+#        sudo -u hermes python3 -m venv /var/lib/agent-teams/venv
+#        sudo -u hermes /var/lib/agent-teams/venv/bin/pip install /path/to/agent-teams
+#        sudo -u hermes /var/lib/agent-teams/venv/bin/playwright install chromium
+#   3. Put your config in /etc/agent-teams.env (see EnvironmentFile below).
+#   4. sudo cp deploy/agent-teams.service /etc/systemd/system/
+#      sudo systemctl daemon-reload && sudo systemctl enable --now agent-teams
+#
+# Verify the unit before enabling:  systemd-analyze verify deploy/agent-teams.service
+
+[Unit]
+Description=Agent Teams — multi-agent server + dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+# All runtime knobs (SWARM_API_KEY, SWARM_LLM_BASE_URL, SWARM_LLM_API_KEY,
+# SWARM_DATA_DIR, SWARM_LOG_FILE, SWARM_HOST/PORT, …) live here. chmod 600 it.
+EnvironmentFile=/etc/agent-teams.env
+WorkingDirectory=/var/lib/agent-teams
+ExecStart=/var/lib/agent-teams/venv/bin/agent-teams up
+Restart=on-failure
+RestartSec=5
+# Graceful shutdown: the app's lifespan finalizer stops daemons + flushes
+# browser cookies, so give it room before SIGKILL.
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+# Hardening (agents can run terminal commands as this user — contain them).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agent-teams
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

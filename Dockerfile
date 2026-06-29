@@ -1,4 +1,4 @@
-# Hermes Swarm — self-contained image (Python + Hermes + Chromium + dashboard).
+# Agent Teams — self-contained image (Python + Hermes + Chromium + dashboard).
 # Uses Debian Bookworm (stable) for reliable package repos.
 FROM python:3.12-slim-bookworm
 
@@ -44,4 +44,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
-CMD ["hermes-swarm", "up"]
+CMD ["agent-teams", "up"]

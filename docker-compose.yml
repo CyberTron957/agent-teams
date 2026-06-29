@@ -1,7 +1,7 @@
 services:
   swarm:
     build: .
-    image: hermes-swarm:latest
+    image: agent-teams:latest
     env_file:
       # Optional: provider keys / SWARM_API_KEY etc. A fresh clone has no .env
       # (it's gitignored) — `required: false` lets `docker compose up` work

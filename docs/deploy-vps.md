@@ -1,6 +1,6 @@
-# Deploying Hermes Swarm on a VPS (or any always-on host)
+# Deploying Agent Teams on a VPS (or any always-on host)
 
-Hermes Swarm is built to run **24/7, unattended**. This guide covers a hardened
+Agent Teams is built to run **24/7, unattended**. This guide covers a hardened
 self-hosted setup. Read the threat model first — it determines everything else.
 
 ## Threat model (read this)
@@ -21,7 +21,7 @@ Two consequences drive the rest of this doc:
    once and stores it in your browser.
 2. **Prefer containment.** Docker (below) is the easiest way to keep agent
    terminal access off your host filesystem. On bare metal, use the dedicated
-   user + the systemd hardening in `deploy/hermes-swarm.service`.
+   user + the systemd hardening in `deploy/agent-teams.service`.
 
 ---
 
@@ -31,7 +31,7 @@ The image bundles Python, Hermes, Chromium and the dashboard, and runs the
 agents inside the container — so their terminal access is contained.
 
 ```bash
-git clone <repo> hermes-swarm && cd hermes-swarm
+git clone <repo> agent-teams && cd agent-teams
 cp .env.example .env
 # Edit .env:
 #   SWARM_API_KEY=<a long random string>     → REQUIRED when exposed
@@ -79,38 +79,38 @@ API key when prompted.
 ## Option B — bare metal with systemd
 
 For a host where Docker isn't an option. Contain the agents with a dedicated
-user; `deploy/hermes-swarm.service` adds systemd sandboxing on top.
+user; `deploy/agent-teams.service` adds systemd sandboxing on top.
 
 ```bash
-sudo useradd --system --create-home --home-dir /var/lib/hermes-swarm hermes
-sudo -u hermes python3 -m venv /var/lib/hermes-swarm/venv
-sudo -u hermes /var/lib/hermes-swarm/venv/bin/pip install /path/to/hermes-swarm
-sudo -u hermes /var/lib/hermes-swarm/venv/bin/playwright install chromium
+sudo useradd --system --create-home --home-dir /var/lib/agent-teams hermes
+sudo -u hermes python3 -m venv /var/lib/agent-teams/venv
+sudo -u hermes /var/lib/agent-teams/venv/bin/pip install /path/to/agent-teams
+sudo -u hermes /var/lib/agent-teams/venv/bin/playwright install chromium
 
 # Configure the provider as the service user (writes ~/.hermes for that user;
 # the swarm adopts it). Custom / OpenAI-compatible endpoint → pick "custom".
-sudo -u hermes HOME=/var/lib/hermes-swarm /var/lib/hermes-swarm/venv/bin/hermes setup
+sudo -u hermes HOME=/var/lib/agent-teams /var/lib/agent-teams/venv/bin/hermes setup
 
-sudo tee /etc/hermes-swarm.env >/dev/null <<'EOF'
+sudo tee /etc/agent-teams.env >/dev/null <<'EOF'
 SWARM_API_KEY=<a long random string>
-SWARM_DATA_DIR=/var/lib/hermes-swarm/data
-SWARM_LOG_FILE=/var/lib/hermes-swarm/swarm.log
+SWARM_DATA_DIR=/var/lib/agent-teams/data
+SWARM_LOG_FILE=/var/lib/agent-teams/swarm.log
 SWARM_HOST=127.0.0.1
 EOF
-sudo chmod 600 /etc/hermes-swarm.env
+sudo chmod 600 /etc/agent-teams.env
 
-sudo cp deploy/hermes-swarm.service /etc/systemd/system/
+sudo cp deploy/agent-teams.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now hermes-swarm
+sudo systemctl enable --now agent-teams
 ```
 
 Front it with the same Caddy/nginx TLS proxy as Option A. Check it:
 
 ```bash
-systemd-analyze verify deploy/hermes-swarm.service   # validate the unit
-systemctl status hermes-swarm
+systemd-analyze verify deploy/agent-teams.service   # validate the unit
+systemctl status agent-teams
 curl -s localhost:8000/health | jq                   # liveness only without the key
-journalctl -u hermes-swarm -f                         # or tail $SWARM_LOG_FILE
+journalctl -u agent-teams -f                         # or tail $SWARM_LOG_FILE
 ```
 
 `Restart=on-failure` brings the server back after a crash; the lifespan
@@ -136,7 +136,7 @@ finalizer drains agents and flushes browser cookies on `systemctl stop`.
 - **Data & backups.** All state is under `SWARM_DATA_DIR`; every config save
   keeps a rotating backup in `<data>/config_backups/`. Back up that directory.
 - **Secrets.** Team credentials and the LLM key are stored on disk (the
-  credentials file is `0600`). Keep `SWARM_DATA_DIR` and `/etc/hermes-swarm.env`
+  credentials file is `0600`). Keep `SWARM_DATA_DIR` and `/etc/agent-teams.env`
   off any world-readable path; treat the host as holding live secrets.
 
 ---

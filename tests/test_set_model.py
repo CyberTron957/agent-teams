@@ -1,4 +1,4 @@
-"""Unit tests for the `hermes-swarm set-model` CLI command.
+"""Unit tests for the `agent-teams set-model` CLI command.
 
 These patch out the actual config write (set_default_model) so they stay fast
 and never touch a real ~/.hermes — we only assert the command's normalization

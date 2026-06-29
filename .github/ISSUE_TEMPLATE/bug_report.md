@@ -17,7 +17,7 @@ What you expected to happen.
 **Environment**
 - Install method: one-liner / Docker / clone
 - OS:
-- Output of `hermes-swarm doctor`:
+- Output of `agent-teams doctor`:
 
 ```
 (paste here)

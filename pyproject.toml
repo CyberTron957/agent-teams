@@ -3,14 +3,14 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-swarm"
+name = "agent-teams"
 version = "0.4.2"
-description = "P2P multi-agent swarm server with a real-time dashboard, powered by the Hermes agent."
+description = "P2P multi-agent teams server with a real-time dashboard, powered by the Hermes agent."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Pradhyun" }]
-keywords = ["agents", "multi-agent", "hermes", "swarm", "llm", "automation"]
+keywords = ["agents", "multi-agent", "teams", "llm", "automation"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Framework :: FastAPI",
@@ -35,13 +35,13 @@ dependencies = [
 # swarm_server/web_crawl4ai.py). Without it, the fallback still works via httpx
 # (a core dep) — fine for server-rendered pages, but single-page apps that need
 # a real browser to paint their content come back empty. Install with
-# `pip install hermes-swarm[web]` and run `playwright install chromium`. Only
+# `pip install agent-teams[web]` and run `playwright install chromium`. Only
 # used when the user hasn't configured a Hermes extract backend (firecrawl/
 # tavily/exa/…), which always takes precedence.
 web = ["crawl4ai"]
 
 [project.scripts]
-hermes-swarm = "swarm_server.cli:main"
+agent-teams = "swarm_server.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/CyberTron957/hermes-mission-control"
@@ -54,4 +54,4 @@ packages = ["swarm_server"]
 # Ship the static dashboard. Resolved at runtime by config._resolve_dashboard_dir
 # (it probes this share/ location for pip installs).
 [tool.setuptools.data-files]
-"share/hermes-swarm/dashboard" = ["dashboard/index.html"]
+"share/agent-teams/dashboard" = ["dashboard/index.html"]

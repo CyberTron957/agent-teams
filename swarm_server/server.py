@@ -236,7 +236,7 @@ async def lifespan(app: FastAPI):
         log.info("[Shutdown] All sweep tasks cancelled")
 
 
-app = FastAPI(title="Hermes Swarm Server", version=__version__, lifespan=lifespan)
+app = FastAPI(title="Agent Teams Server", version=__version__, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

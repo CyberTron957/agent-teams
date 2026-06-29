@@ -12,7 +12,7 @@ log = logging.getLogger("swarm")
 
 if __name__ == "__main__":
     log.info("=" * 60)
-    log.info("  Hermes Swarm Server v0.3.0")
+    log.info("  Agent Teams Server v0.3.0")
     log.info("  Dashboard:  http://%s:%s/", SERVER_HOST, SERVER_PORT)
     log.info("=" * 60)
     uvicorn.run(

@@ -1,15 +1,15 @@
-"""``hermes-swarm`` command-line entry point.
+"""``agent-teams`` command-line entry point.
 
 Subcommands:
-  hermes-swarm up        Run the swarm server + dashboard (default)
-  hermes-swarm down      Stop a server started with `up` (incl. detached)
-  hermes-swarm status    Is the server running? show URL + health
-  hermes-swarm setup     Full interactive provider/tool wizard (`hermes setup`)
-  hermes-swarm set-model Set provider/model non-interactively (scriptable)
-  hermes-swarm init      Scaffold a starter team + coordinator agent
-  hermes-swarm doctor    Check Hermes, the model backend, and Chromium
+  agent-teams up        Run the swarm server + dashboard (default)
+  agent-teams down      Stop a server started with `up` (incl. detached)
+  agent-teams status    Is the server running? show URL + health
+  agent-teams setup     Full interactive provider/tool wizard (`hermes setup`)
+  agent-teams set-model Set provider/model non-interactively (scriptable)
+  agent-teams init      Scaffold a starter team + coordinator agent
+  agent-teams doctor    Check Hermes, the model backend, and Chromium
 
-Installed as a console script via pyproject (``hermes-swarm = swarm_server.cli:main``).
+Installed as a console script via pyproject (``agent-teams = swarm_server.cli:main``).
 """
 
 import argparse
@@ -83,12 +83,12 @@ BANNER = r"""
  |_|  |_|\___|_|  |_| |_| |_|\___||___/|_____/  \_/\_/ \__,_|_|  |_| |_| |_|   
 
     Commands:
-      • Start Swarm (FG):  hermes-swarm up
-      • Start (Detached):  hermes-swarm up --detach
-      • Stop Swarm:        hermes-swarm down
-      • Check Status:      hermes-swarm status
-      • Configuration:     hermes-swarm setup
-      • Swarm Doctor:      hermes-swarm doctor
+      • Start Swarm (FG):  agent-teams up
+      • Start (Detached):  agent-teams up --detach
+      • Stop Swarm:        agent-teams down
+      • Check Status:      agent-teams status
+      • Configuration:     agent-teams setup
+      • Swarm Doctor:      agent-teams doctor
 """
 
 def print_banner() -> None:
@@ -173,7 +173,7 @@ def cmd_up(args) -> int:
 def _start_detached(args) -> int:
     """Daemonize and return immediately, leaving the server running independently.
 
-    Why this exists: `nohup hermes-swarm up &` does NOT reliably survive an AI
+    Why this exists: `nohup agent-teams up &` does NOT reliably survive an AI
     coding agent starting it — the agent's bash tool kills its whole process
     group when the command returns, taking the backgrounded server with it (the
     server answers once, then vanishes, and `status` reports it down). A real
@@ -186,7 +186,7 @@ def _start_detached(args) -> int:
 
     if not hasattr(os, "fork"):
         print("--detach needs POSIX fork (Linux/macOS). On Windows, run "
-              "`hermes-swarm up` under a service manager, or use Docker.",
+              "`agent-teams up` under a service manager, or use Docker.",
               file=sys.stderr)
         return 2
 
@@ -207,7 +207,7 @@ def _start_detached(args) -> int:
                 print(f"● started (pid {_running_pid() or '?'}) → "
                       f"http://{SERVER_HOST}:{SERVER_PORT}/")
                 print(f"  logs:    {log_path}")
-                print(f"  status:  hermes-swarm status   ·   stop:  hermes-swarm down")
+                print(f"  status:  agent-teams status   ·   stop:  agent-teams down")
                 return 0
         print(f"Started, but it hasn't answered /health yet — check the log: {log_path}",
               file=sys.stderr)
@@ -239,7 +239,7 @@ def _serve(args) -> int:
 
     log = logging.getLogger("swarm")
     log.info("=" * 60)
-    log.info("  Hermes Swarm Server")
+    log.info("  Agent Teams Server")
     log.info("  Dashboard:    http://%s:%s/", SERVER_HOST, SERVER_PORT)
     try:
         from swarm_server.model_config import resolve_model, is_model_configured
@@ -252,7 +252,7 @@ def _serve(args) -> int:
             log.warning("  Model:        none configured — run `hermes setup`")
     except Exception as e:  # never let a config probe block server start
         log.debug("startup model resolve failed: %s", e)
-    log.info("  Stop it with:  hermes-swarm down   (status: hermes-swarm status)")
+    log.info("  Stop it with:  agent-teams down   (status: agent-teams status)")
     log.info("=" * 60)
     _write_pidfile()              # so `down`/`status` find a detached server
     try:
@@ -280,7 +280,7 @@ def cmd_down(args) -> int:
         if _probe_health(SERVER_HOST, SERVER_PORT):
             print("A server is responding but no pidfile was found "
                   "(started outside this data dir).")
-            print("   → stop it where it runs (Ctrl-C), or:  pkill -f 'hermes-swarm up'")
+            print("   → stop it where it runs (Ctrl-C), or:  pkill -f 'agent-teams up'")
             return 1
         print("○ Not running — nothing to stop.")
         return 0
@@ -320,10 +320,10 @@ def cmd_status(args) -> int:
         print(f"● running ({where})")
         print(f"   Dashboard:  {url}/")
         print(f"   Health:     {'ok' if healthy else 'starting… (not responding yet)'}")
-        print(f"   Stop it:    hermes-swarm down")
+        print(f"   Stop it:    agent-teams down")
         return 0
     print("○ not running")
-    print("   Start it:   hermes-swarm up")
+    print("   Start it:   agent-teams up")
     return 1
 
 
@@ -483,7 +483,7 @@ def cmd_init(args) -> int:
 
     agent_id = args.agent
     if not agent_id:
-        print("\nNext: `hermes-swarm up` and open the dashboard.")
+        print("\nNext: `agent-teams up` and open the dashboard.")
         return 0
 
     if agent_id in cfg["agents"]:
@@ -506,7 +506,7 @@ def cmd_init(args) -> int:
     entry["autonomous"] = True
     save_agent_config(agent_id, entry)
     print(f"✓ Created autonomous agent '{agent_id}' on team '{team_id}'")
-    print("\nNext: `hermes-swarm up` and open the dashboard.")
+    print("\nNext: `agent-teams up` and open the dashboard.")
     return 0
 
 
@@ -518,7 +518,7 @@ def cmd_set_model(args) -> int:
     to the swarm's shared config (``data/.hermes-shared``), which every agent
     reads as its default. Example:
 
-      hermes-swarm set-model --provider custom --model deepseek-chat \\
+      agent-teams set-model --provider custom --model deepseek-chat \\
         --base-url http://localhost:4000/v1 --api-key sk-...
     """
     import re
@@ -545,14 +545,14 @@ def cmd_set_model(args) -> int:
     if base_url:
         shown += f" base_url={base_url}"
     print(f"✓ Default model set ({shown}).")
-    print("  Written to the swarm's shared config. Verify reachability with: hermes-swarm doctor")
+    print("  Written to the swarm's shared config. Verify reachability with: agent-teams doctor")
     return 0
 
 
 def _run_upgrade() -> int:
     """Pull `main` and reinstall in place. Returns 0 on success, non-zero on failure.
 
-    Used by both `hermes-swarm update` and the opt-in startup auto-update. Runs
+    Used by both `agent-teams update` and the opt-in startup auto-update. Runs
     subprocesses with arg lists (no shell-string interpolation) targeting THIS
     interpreter's environment via `sys.executable -m pip`.
     """
@@ -610,7 +610,7 @@ def cmd_update(args) -> int:
               "(git pull + pip install -e .) may not apply to your install.")
 
     if getattr(args, "check", False):
-        print(f"\nUpdate available → {latest}. Run `hermes-swarm update` to install.")
+        print(f"\nUpdate available → {latest}. Run `agent-teams update` to install.")
         return 0
 
     if not getattr(args, "yes", False):
@@ -624,7 +624,7 @@ def cmd_update(args) -> int:
 
     rc = _run_upgrade()
     if rc == 0:
-        print(f"\n✓ Updated to {latest}. Verify with: hermes-swarm doctor")
+        print(f"\n✓ Updated to {latest}. Verify with: agent-teams doctor")
         print("  Restart a running server for the new version to take effect.")
     return rc
 
@@ -632,7 +632,7 @@ def cmd_update(args) -> int:
 def main(argv=None) -> int:
     _setup_logging()
     p = argparse.ArgumentParser(
-        prog="hermes-swarm",
+        prog="agent-teams",
         description="P2P multi-agent swarm server + real-time dashboard, powered by Hermes.",
     )
     sub = p.add_subparsers(dest="cmd")
@@ -685,7 +685,7 @@ def main(argv=None) -> int:
 
     args = p.parse_args(argv)
     func = getattr(args, "func", None)
-    if func is None:  # bare `hermes-swarm` → run the server
+    if func is None:  # bare `agent-teams` → run the server
         return cmd_up(args)
     return func(args)
 

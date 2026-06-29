@@ -9,7 +9,7 @@ one of those, today it degrades SILENTLY (every reach-in is wrapped in
 
 This module turns silent drift into a LOUD signal: it probes each fragile seam
 against the *installed* Hermes and reports which ones still hold. Run at server
-startup (warn-only — never blocks boot) and surfaced by ``hermes-swarm doctor``.
+startup (warn-only — never blocks boot) and surfaced by ``agent-teams doctor``.
 
 Add a probe here whenever the swarm starts depending on a new Hermes internal,
 so "did this Hermes release break us?" is answerable in one place.

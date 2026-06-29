@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hermes Swarm — Mission control for a swarm of agents</title>
+<title>Agent Teams — Mission control for a swarm of agents</title>
 <meta name="description" content="A self-hostable team of full AI agents that collaborate 24/7 on your own hardware — browsing, building, publishing — and one real-time console to command them.">
 
 <!-- Favicons -->
@@ -14,16 +14,16 @@
 
 <!-- Open Graph / social share cards (absolute urls required by social scrapers). -->
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Hermes Swarm">
-<meta property="og:title" content="Hermes Swarm — Mission control for a swarm of agents">
+<meta property="og:site_name" content="Agent Teams">
+<meta property="og:title" content="Agent Teams — Mission control for a swarm of agents">
 <meta property="og:description" content="A self-hostable team of full AI agents that browse, build & publish 24/7 on your own hardware — one real-time console to command them.">
 <meta property="og:image" content="https://missioncontrol.lunalabs-ai.com/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Hermes Swarm — mission control for a swarm of agents">
+<meta property="og:image:alt" content="Agent Teams — mission control for a swarm of agents">
 <meta property="og:url" content="https://missioncontrol.lunalabs-ai.com/">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Hermes Swarm — Mission control for a swarm of agents">
+<meta name="twitter:title" content="Agent Teams — Mission control for a swarm of agents">
 <meta name="twitter:description" content="A self-hostable team of full AI agents that browse, build & publish 24/7 on your own hardware — one real-time console to command them.">
 <meta name="twitter:image" content="https://missioncontrol.lunalabs-ai.com/og-image.png">
 
@@ -444,7 +444,7 @@ footer .wrap{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:32px}
 <!-- ============ NAV ============ -->
 <nav class="nav" id="nav">
   <div class="wrap">
-    <a class="brand" href="#top" aria-label="Hermes Swarm home">
+    <a class="brand" href="#top" aria-label="Agent Teams home">
       <svg class="mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
         <path d="M16 4 L26 9.5 V22.5 L16 28 L6 22.5 V9.5 Z" stroke="#2E2E34" stroke-width="1"/>
         <circle cx="16" cy="16" r="2.4" fill="#fff"/>
@@ -460,7 +460,7 @@ footer .wrap{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:32px}
           <line x1="16" y1="16" x2="8" y2="20.5"/><line x1="16" y1="16" x2="8" y2="12"/>
         </g>
       </svg>
-      <span class="wordmark">Hermes<span>·</span>Swarm</span>
+      <span class="wordmark">Agent<span>·</span>Teams</span>
     </a>
     <div class="nav-links">
       <a href="#install">Deploy</a>
@@ -495,7 +495,7 @@ footer .wrap{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:32px}
       <span class="ln"><span class="hero-line"><em>of agents.</em></span></span>
     </h1>
     <p class="hero-sub reveal" data-d="2">
-      Hermes Swarm runs a team of full AI agents on your own hardware — browsing,
+      Agent Teams runs a team of full AI agents on your own hardware — browsing,
       building, publishing, collaborating peer-to-peer. One real-time console to
       watch every move and steer the mission.
     </p>
@@ -541,7 +541,7 @@ footer .wrap{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:32px}
       <ul class="install-list reveal" data-d="1" style="margin-top:36px">
         <li><span class="k">DETECTS</span><span class="v"><b>Your machine</b><span>Python 3.11+, a browser, an existing Hermes config — it picks the right path automatically.</span></span></li>
         <li><span class="k">ADOPTS</span><span class="v"><b>Your provider</b><span>40+ LLM providers via <code class="mono">hermes setup</code>. Already configured? It reuses your keys and skips the wizard.</span></span></li>
-        <li><span class="k">VERIFIES</span><span class="v"><b>The stack</b><span><code class="mono">hermes-swarm doctor</code> confirms runtime, model reachability, and Chromium before you start.</span></span></li>
+        <li><span class="k">VERIFIES</span><span class="v"><b>The stack</b><span><code class="mono">agent-teams doctor</code> confirms runtime, model reachability, and Chromium before you start.</span></span></li>
       </ul>
     </div>
 
@@ -617,7 +617,7 @@ footer .wrap{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:32px}
 
     <div class="console-frame reveal" data-d="1">
       <div class="cf-top">
-        <span class="brand"><span class="wordmark">Hermes·Swarm</span></span>
+        <span class="brand"><span class="wordmark">Agent·Teams</span></span>
         <span class="cf-live"><span class="livedot"></span>Live</span>
         <span class="cf-clock" id="cfClock">--:--:-- UTC</span>
       </div>
@@ -795,36 +795,36 @@ footer .wrap{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:32px}
 
 <!-- Prompt sources for the hero "hand it to your AI agent" copy buttons.
      type="text/plain" keeps them out of the render tree; JS reads .textContent. -->
-<script type="text/plain" id="promptLocal">Install and run Hermes Swarm on this machine for me.
+<script type="text/plain" id="promptLocal">Install and run Agent Teams on this machine for me.
 
-Hermes Swarm (https://github.com/CyberTron957/hermes-mission-control) is a
+Agent Teams (https://github.com/CyberTron957/hermes-mission-control) is a
 self-hosted multi-agent server with a real-time dashboard. Please:
 
 1. Check prerequisites first: Python 3.11+ (or Docker). If something is missing,
    tell me before installing any system packages.
-2. Clone the repo into ./hermes-swarm and run its installer: `bash install.sh --no-run`.
+2. Clone the repo into ./agent-teams and run its installer: `bash install.sh --no-run`.
    It creates a .venv, installs dependencies, and installs Chromium for the
    browser tools. (Pass `--no-browser` if Chromium can't install — everything
    else still works.)
-3. Check whether a provider is already configured: `.venv/bin/hermes-swarm doctor`.
+3. Check whether a provider is already configured: `.venv/bin/agent-teams doctor`.
    If it already shows a model (e.g. an existing ~/.hermes setup), ADOPT IT —
    don't ask me for keys. Otherwise PAUSE and ask me which provider + key to use
-   (don't guess), then set it: `.venv/bin/hermes-swarm set-model --provider <p>
-   --model <m> [--base-url <url>] --api-key <key>`. Tell me I can configure
-   web-search / vision / browser / memory tools anytime with
-   `.venv/bin/hermes-swarm setup`.
-4. Verify with `.venv/bin/hermes-swarm doctor` and fix anything it flags.
+    (don't guess), then set it: `.venv/bin/agent-teams set-model --provider <p>
+    --model <m> [--base-url <url>] --api-key <key>`. Tell me I can configure
+    web-search / vision / browser / memory tools anytime with
+    `.venv/bin/agent-teams setup`.
+4. Verify with `.venv/bin/agent-teams doctor` and fix anything it flags.
 5. Scaffold a team and start it detached (use --detach, NOT nohup/& — backgrounding
    it from your shell kills it when your session ends):
-   `.venv/bin/hermes-swarm init && .venv/bin/hermes-swarm up --detach`.
-6. Confirm the dashboard is live at http://127.0.0.1:8000 (`hermes-swarm status`),
-   then tell me how to open it, build my first team with the Architect, and manage
-   the server (`hermes-swarm status` / `hermes-swarm down` / `hermes-swarm setup`).
+   `.venv/bin/agent-teams init && .venv/bin/agent-teams up --detach`.
+6. Confirm the dashboard is live at http://127.0.0.1:8000 (`agent-teams status`),
+    then tell me how to open it, build my first team with the Architect, and manage
+    the server (`agent-teams status` / `agent-teams down` / `agent-teams setup`).
 
 Keep my API key local. Don't commit anything or send data anywhere.</script>
-<script type="text/plain" id="promptVps">Deploy Hermes Swarm on this VPS, exposed safely over HTTPS.
+<script type="text/plain" id="promptVps">Deploy Agent Teams on this VPS, exposed safely over HTTPS.
 
-Hermes Swarm (https://github.com/CyberTron957/hermes-mission-control) is a
+Agent Teams (https://github.com/CyberTron957/hermes-mission-control) is a
 self-hosted multi-agent server. Its agents can run terminal commands as the
 server user, so containment and auth matter. Please:
 
@@ -880,7 +880,7 @@ file that could be committed.</script>
           <circle cx="24" cy="20.5" r="1.7" fill="#45D6E8"/><circle cx="16" cy="24.5" r="1.7" fill="#5B9DFF"/>
           <circle cx="8" cy="20.5" r="1.7" fill="#fff"/><circle cx="8" cy="12" r="1.7" fill="#F2555A"/>
         </svg>
-        <span class="wordmark">Hermes<span>·</span>Swarm</span>
+        <span class="wordmark">Agent<span>·</span>Teams</span>
       </a>
       <p>A self-hostable multi-agent swarm server with a real-time mission-control dashboard.</p>
     </div>
@@ -1005,22 +1005,22 @@ file that could be committed.</script>
     ],
     docker: [
       {t:'cm', x:'# everything bundled — python, hermes, chromium'},
-      {t:'cmd', x:'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm'},
-      {t:'cmd', x:'docker compose run --rm swarm hermes-swarm setup'},
+      {t:'cmd', x:'git clone https://github.com/CyberTron957/hermes-mission-control agent-teams && cd agent-teams'},
+      {t:'cmd', x:'docker compose run --rm swarm agent-teams setup'},
       {t:'cmd', x:'docker compose up --build'},
       {t:'ok',  x:'✓ dashboard → http://127.0.0.1:8000'}
     ],
     clone: [
       {t:'cm', x:'# already have the repo? same script, from the clone'},
-      {t:'cmd', x:'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm'},
-      {t:'cmd', x:'cd hermes-swarm && bash install.sh'},
+      {t:'cmd', x:'git clone https://github.com/CyberTron957/hermes-mission-control agent-teams'},
+      {t:'cmd', x:'cd agent-teams && bash install.sh'},
       {t:'ok',  x:'✓ serving on http://127.0.0.1:8000'}
     ]
   };
   var COPY = {
     oneline: ONELINER,
-    docker:  'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm && docker compose run --rm swarm hermes-swarm setup && docker compose up --build',
-    clone:   'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm && bash install.sh'
+    docker:  'git clone https://github.com/CyberTron957/hermes-mission-control agent-teams && cd agent-teams && docker compose run --rm swarm agent-teams setup && docker compose up --build',
+    clone:   'git clone https://github.com/CyberTron957/hermes-mission-control agent-teams && cd agent-teams && bash install.sh'
   };
   var termBody = document.getElementById('termBody');
   var copyBtn = document.getElementById('copyTerm');

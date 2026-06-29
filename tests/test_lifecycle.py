@@ -1,5 +1,5 @@
 """Unit tests for the server-lifecycle CLI commands: `status`, `down`, `setup`,
-and the pidfile helpers that make them work for a detached `hermes-swarm up`.
+and the pidfile helpers that make them work for a detached `agent-teams up`.
 
 These never start a real server — they patch the pidfile path to a tmp dir and
 fake liveness/health probes, so they stay fast and hermetic.

@@ -16,7 +16,7 @@ distance and trustworthy at 3am.
 
 ## Product Purpose
 
-Hermes Swarm is a self-hostable multi-agent swarm server with a real-time
+Agent Teams is a self-hostable multi-agent swarm server with a real-time
 dashboard. Each agent is a full Hermes agent (web browsing, terminal, files,
 publishing); agents collaborate peer-to-peer on shared projects. The dashboard
 is the single pane of glass for the whole team: live execution view, per-agent

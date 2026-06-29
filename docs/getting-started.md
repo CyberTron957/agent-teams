@@ -1,9 +1,9 @@
-# Getting Started with Hermes Swarm
+# Getting Started with Agent Teams
 
 A complete walkthrough — from downloading the project to running a multi-agent
 team that works on its own and asks you for help when it needs it.
 
-> **What this is.** Hermes Swarm runs a team of AI agents that collaborate on a
+> **What this is.** Agent Teams runs a team of AI agents that collaborate on a
 > shared project 24/7. Each agent can browse the web, run a terminal, write
 > files, and publish to real platforms. You watch and steer the whole team from
 > one web dashboard. This guide assumes you're comfortable with a terminal, API
@@ -41,7 +41,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CyberTron957/hermes-mission-
 That clones the repo, sets up a local `.venv`, installs everything, fetches a
 browser, runs `hermes setup` if you don't already have a provider (40+ providers,
 incl. a custom / OpenAI-compatible endpoint), scaffolds a starter team, verifies
-with `hermes-swarm doctor`, and offers to start the dashboard. **Already have
+with `agent-teams doctor`, and offers to start the dashboard. **Already have
 `~/.hermes`?** It adopts your provider + keys and skips setup. Safe to re-run.
 *(Flags: `--no-run`, `--no-setup`, `--no-browser`, `--yes`.)*
 
@@ -54,7 +54,7 @@ Runs the agents *inside* the container (keeping their terminal access off your
 host); data persists in the `swarm-data` volume.
 
 ```bash
-git clone <this-repo> hermes-swarm && cd hermes-swarm
+git clone <this-repo> agent-teams && cd agent-teams
 docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup
 docker compose up --build
 ```
@@ -64,7 +64,7 @@ config on the volume, so it persists). Using a LiteLLM proxy or other
 OpenAI-compatible endpoint? Choose **custom** and enter its base URL + key (for
 one on your host, use `http://host.docker.internal:<port>`).
 
-> `hermes-swarm doctor` is the fastest way to diagnose a bad install — it checks
+> `agent-teams doctor` is the fastest way to diagnose a bad install — it checks
 > that Hermes imports, a model is configured (and reachable), Chromium is
 > available, and the Hermes compat seams hold, telling you exactly what to fix.
 
@@ -218,7 +218,7 @@ bare-metal with the included systemd unit, plus a threat model — is in
 ## 10. Data, backups, and logs
 
 - **State** lives under `SWARM_DATA_DIR` (the `swarm-data` volume in Docker, or
-  `./data` / `~/.hermes-swarm/data` otherwise): team configs, task queues,
+  `./data` / `~/.agent-teams/data` otherwise): team configs, task queues,
   per-agent conversation history, the shared project, and credentials.
 - **Backups**: every config save keeps a rotating copy under
   `<data>/config_backups/`. Back up the whole `SWARM_DATA_DIR` to be safe.
@@ -244,12 +244,12 @@ logins persist across restarts too.
 | Symptom | Fix |
 |---|---|
 | Dashboard loads but nothing works / 401s | `SWARM_API_KEY` is set — enter it when prompted (or unset it for local use). |
-| "Hermes NOT importable" | `pip install hermes-agent`, or set `HERMES_AGENT_PATH`. Run `hermes-swarm doctor`. |
-| "LLM backend NOT reachable" | Re-run `hermes setup` (or `hermes-swarm doctor`) — check the provider key, and for a custom endpoint that its base URL serves the chosen model. |
+| "Hermes NOT importable" | `pip install hermes-agent`, or set `HERMES_AGENT_PATH`. Run `agent-teams doctor`. |
+| "LLM backend NOT reachable" | Re-run `hermes setup` (or `agent-teams doctor`) — check the provider key, and for a custom endpoint that its base URL serves the chosen model. |
 | Browser tools unavailable | `playwright install chromium` (or install Chrome). Everything else still works. |
 | Agent/Architect can't read a page or describes a URL wrongly | `web_extract` had no backend. Search works out of the box; for extract either configure a Hermes web backend (Firecrawl/Tavily/Exa) or install `pip install .[web]` (crawl4ai) for JS-heavy sites. A configured Hermes backend is always used as-is. |
 | Agents idle and doing nothing | Send a task, or mark the coordinator **autonomous** so it self-drives. |
 | Costs climbing fast | Set a per-team daily budget (§7). |
 
-Run `hermes-swarm doctor` whenever something's off — it pinpoints which of the
+Run `agent-teams doctor` whenever something's off — it pinpoints which of the
 three prerequisites (Hermes, LLM backend, Chromium) is the problem.
