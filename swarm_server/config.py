@@ -341,11 +341,13 @@ TOOL_RESULT_AGE_KEEP_MESSAGES = int(os.environ.get("SWARM_TOOL_RESULT_AGE_KEEP_M
 TOOL_RESULT_AGE_MIN_CHARS = int(os.environ.get("SWARM_TOOL_RESULT_AGE_MIN_CHARS", "600"))
 TOOL_RESULT_AGE_QUANTUM = int(os.environ.get("SWARM_TOOL_RESULT_AGE_QUANTUM", "20"))
 
-# Opt-in: at `hermes-swarm up`, if a newer version is on `main`, upgrade in place
-# and re-exec BEFORE agents start (never interrupts in-flight work). Off by default;
-# no-op inside Docker (the image is rebuilt instead). See swarm_server/update_check.py.
+# At `hermes-swarm up`, if local git HEAD is behind `main`, upgrade in place and
+# re-exec BEFORE agents start (never interrupts in-flight work). ON by default so
+# fixes pushed to `main` reach every install on its next start with no user action;
+# set SWARM_AUTO_UPDATE=0 (or false/no) to opt out. No-op inside Docker (the image
+# is rebuilt instead). See _maybe_auto_update() in swarm_server/cli.py.
 AUTO_UPDATE_ENABLED = os.environ.get(
-    "SWARM_AUTO_UPDATE", "0").lower() not in ("0", "false", "no", "")
+    "SWARM_AUTO_UPDATE", "1").lower() not in ("0", "false", "no")
 
 # Supervisor counterpart: a supervisor's history is dominated by its own past
 # sweep PAYLOADS (user-side team feeds — measured 96% of one overseer's session

@@ -98,27 +98,60 @@ def print_banner() -> None:
         print(BANNER)
 
 
-def _maybe_auto_update() -> None:
-    """Opt-in startup auto-update: pull `main` + reinstall, then re-exec.
+def _git_head(project_root) -> "str | None":
+    """Current HEAD commit SHA, or None if it can't be read."""
+    import subprocess
 
-    Runs only when SWARM_AUTO_UPDATE is set, before agents start, so it never
-    interrupts in-flight work. No-op inside Docker (rebuild the image instead).
-    Guarded by SWARM_DID_AUTOUPDATE so a failed/again-stale check can't re-exec
-    in a loop.
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip() if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _maybe_auto_update() -> None:
+    """Startup auto-update: fast-forward `main` + reinstall, then re-exec.
+
+    Commit-driven (not version-driven): any new commit on `main` — a hotfix with
+    no version bump, or a tagged release — is applied. Runs before agents start, so
+    it never interrupts in-flight work; on by default (SWARM_AUTO_UPDATE=0 opts out).
+    No-op outside a git checkout (Docker rebuilds the image instead). Guarded by
+    SWARM_DID_AUTOUPDATE so the post-update re-exec can't loop. Any failure (offline,
+    dirty/diverged tree, timeout) is non-fatal — we just start the current version.
     """
-    from swarm_server.config import AUTO_UPDATE_ENABLED
+    import subprocess
+
+    from swarm_server.config import AUTO_UPDATE_ENABLED, PROJECT_ROOT
+    from swarm_server.update_check import get_install_method
 
     if not AUTO_UPDATE_ENABLED or os.environ.get("SWARM_DID_AUTOUPDATE"):
         return
+    if get_install_method() != "git":
+        return  # Docker / non-checkout: no in-place pull
     try:
-        from swarm_server.update_check import check_for_update
+        before = _git_head(PROJECT_ROOT)
+        rc = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "pull", "--ff-only"],
+            capture_output=True, text=True, timeout=15,
+        ).returncode
+        if rc != 0:
+            return  # offline or can't fast-forward — keep running current code
+        after = _git_head(PROJECT_ROOT)
+        if not after or before == after:
+            return  # already up to date — fast path, no reinstall/re-exec
 
-        info = check_for_update(force=True)
-        if info["install_method"] == "docker" or not info["update_available"]:
-            return
-        print(f"● auto-update: {info['current']} → {info['latest']} (SWARM_AUTO_UPDATE)")
-        if _run_upgrade() != 0:
-            print("auto-update failed; starting the current version.", file=sys.stderr)
+        print(f"● auto-update: new commits on main ({(before or '?')[:7]} → {after[:7]}); "
+              "reinstalling…")
+        rc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", str(PROJECT_ROOT)],
+            capture_output=True, text=True, timeout=300,
+        ).returncode
+        if rc != 0:
+            print("auto-update: reinstall failed; starting the current version.",
+                  file=sys.stderr)
             return
         # Re-exec the upgraded code in place. The marker prevents a re-exec loop.
         print("● restarting with the updated version…")
