@@ -18,7 +18,12 @@ services:
       # WebSocket, and the dashboard prompts for the key on first load.
       - "127.0.0.1:8000:8000"
     volumes:
-      - teams-data:/data
+      # Volume key intentionally kept as "swarm-data" (NOT renamed to teams-data)
+      # so existing deployments' data volume stays mounted across the
+      # hermes-swarm → agent-teams rename — renaming it would silently mount a
+      # fresh empty volume and look like total data loss. DEPRECATED name; rename
+      # with a documented `docker volume` migration in a future major version.
+      - swarm-data:/data
       # Adopt an existing host Hermes setup (provider + tool API keys) without
       # reconfiguring: uncomment to mount it read-only. The container reads
       # ~/.hermes as a fallback and imports its .env secrets on startup.
@@ -31,4 +36,4 @@ services:
       - "host.docker.internal:host-gateway"
 
 volumes:
-  teams-data:
+  swarm-data:  # DEPRECATED key kept for back-compat (see mount comment above)

@@ -629,6 +629,23 @@ def cmd_update(args) -> int:
     return rc
 
 
+def main_compat(argv=None) -> int:
+    """DEPRECATED ``hermes-swarm`` console alias → ``agent-teams``.
+
+    Kept so existing users' muscle memory and systemd ``ExecStart=hermes-swarm …``
+    units keep working after the rename. Prints a one-line notice to stderr (so
+    only people invoking the OLD command ever see it) and then runs normally.
+    Remove this — and the ``hermes-swarm`` entry in pyproject ``[project.scripts]``
+    — in a future major version.
+    """
+    print(
+        "⚠ 'hermes-swarm' is deprecated and will be removed in a future release — "
+        "use 'agent-teams' instead (same arguments).",
+        file=sys.stderr,
+    )
+    return main(argv)
+
+
 def main(argv=None) -> int:
     _setup_logging()
     p = argparse.ArgumentParser(

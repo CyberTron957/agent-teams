@@ -42,6 +42,9 @@ web = ["crawl4ai"]
 
 [project.scripts]
 agent-teams = "teams_server.cli:main"
+# DEPRECATED back-compat alias for the old hermes-swarm command. Prints a notice
+# then delegates to agent-teams. Remove in a future major version.
+hermes-swarm = "teams_server.cli:main_compat"
 
 [project.urls]
 Homepage = "https://github.com/CyberTron957/agent-teams"
@@ -49,7 +52,10 @@ Repository = "https://github.com/CyberTron957/agent-teams"
 Issues = "https://github.com/CyberTron957/agent-teams/issues"
 
 [tool.setuptools]
-packages = ["teams_server"]
+# teams_server is the package; swarm_server is a DEPRECATED shim that aliases to
+# it (back-compat for old imports + the pre-rename auto-update re-exec). Remove
+# swarm_server here in a future major version.
+packages = ["teams_server", "swarm_server"]
 
 # Ship the static dashboard. Resolved at runtime by config._resolve_dashboard_dir
 # (it probes this share/ location for pip installs).
