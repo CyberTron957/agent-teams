@@ -24,6 +24,7 @@ dependencies = [
     "pydantic",
     "aiosqlite",
     "ddgs",
+    "packaging",
     # The agent runtime each teams member runs. [all] pulls the browser/web/file
     # toolsets the teams relies on. Pinned to the floor that has the interrupt()
     # API + the progress callbacks the live-execution view uses.
