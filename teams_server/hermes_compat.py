@@ -109,6 +109,20 @@ def _probe_provider_registry():
         return False, f"PROVIDER_REGISTRY unavailable: {e}"
 
 
+def _probe_gateway_bridge():
+    # gateway_config.py + gateway_bridge.py ride these to reuse Hermes' messaging
+    # gateway: the platform catalogue (_all_platforms / _platform_status), the
+    # static PLATFORMS map, and the one-shot send used to forward inbox questions.
+    # A rename here disables the human-inbox→chat bridge (outbound + reply-back),
+    # not core agent operation — hence non-critical.
+    ok1, d1 = _probe_symbols("hermes_cli.gateway", ["_all_platforms", "_platform_status"])
+    ok2, d2 = _probe_symbols("hermes_cli.platforms", ["PLATFORMS"])
+    ok3, d3 = _probe_symbols("tools.send_message_tool", ["send_message_tool"])
+    if ok1 and ok2 and ok3:
+        return True, "gateway send + platform catalogue present"
+    return False, "; ".join(d for ok, d in ((ok1, d1), (ok2, d2), (ok3, d3)) if not ok)
+
+
 def _probe_aiagent_tool_injection():
     # agent.py injects teams tools by mutating an AIAgent's `.tools` /
     # `.valid_tool_names` / `._tool_use_enforcement` after construction. Hermes
@@ -184,6 +198,7 @@ _PROBES: List[tuple] = [
     ("browser_gui_internals", _probe_browser_internals, True),
     ("aiagent_tool_injection", _probe_aiagent_tool_injection, True),
     ("provider_registry", _probe_provider_registry, True),
+    ("gateway_bridge", _probe_gateway_bridge, False),
     ("web_search_registry", _probe_web_registry, False),
     ("provider_model_seed", _probe_provider_model_seed, False),
     ("aiagent_callbacks", _probe_aiagent_callbacks, False),

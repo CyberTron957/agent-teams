@@ -643,6 +643,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             ">0</span>
         </button>
         <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" aria-label="Model settings" title="Default model for all agents"><span data-icon="cpu" data-icon-size="13"></span> <span class="tb-label">Model</span></button>
+        <button class="btn btn-sm btn-secondary" onclick="showGatewaySettings()" aria-label="Messaging gateway" title="Forward inbox questions to Telegram/Discord and reply from chat"><span data-icon="send" data-icon-size="13"></span> <span class="tb-label">Gateway</span></button>
         <button class="btn btn-sm btn-secondary" onclick="openBrowserPanel(currentTeam)" aria-label="Open team browser" title="Watch & control this team's browser live"><span data-icon="globe" data-icon-size="13"></span> <span class="tb-label">Browser</span></button>
         <button id="team-pause-btn" class="btn btn-sm btn-secondary" data-mode="pause" onclick="toggleTeamPause()" style="display:none" aria-label="Pause team" title="Freeze every agent on this team"><span data-icon="clock" data-icon-size="13"></span> <span class="tb-label">Pause team</span></button>
         <label for="team-select" class="sr-only">Team</label>
@@ -861,6 +862,36 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="hideModal('modal-setup')">Close</button>
             <button class="btn" onclick="saveSetupModel()">Save &amp; apply</button>
+        </div>
+    </div>
+</div>
+
+<!-- Messaging Gateway Modal -->
+<div class="modal-bg" id="modal-gateway">
+    <div class="modal" style="width:480px" role="dialog" aria-modal="true" aria-labelledby="mh-gateway">
+        <div class="modal-header" id="mh-gateway"><span data-icon="send" data-icon-size="14"></span> Messaging gateway</div>
+        <div class="modal-body">
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">
+                Forward <b>human-inbox questions</b> (an agent's <code>ask_human</code> / takeover) to a chat
+                platform, and answer right from chat — the agent unblocks just as if you'd replied in the
+                dashboard. Reuses a bot you set up with <code>hermes setup gateway</code>.
+            </div>
+            <div id="gw-detected"></div>
+            <div class="control-group"><label class="control-label" for="gw-platform">Platform</label><select class="control-select" id="gw-platform" onchange="onGatewayChange()"></select></div>
+            <div id="gw-reply-note" style="font-size:11px;color:var(--busy);line-height:1.5;margin:-4px 0 10px;display:none"></div>
+            <div class="control-group"><label class="control-label" for="gw-token" id="gw-token-label">Bot token</label><input class="control-input" id="gw-token" type="password" placeholder="(stored locally in Hermes .env, never committed)"></div>
+            <div class="control-group"><label class="control-label" for="gw-home-chat">Home chat ID</label><input class="control-input" id="gw-home-chat" placeholder="e.g. 123456789 (your DM) or -100… (a group)"></div>
+            <div style="font-size:11px;color:var(--text-muted);line-height:1.5">The chat we deliver questions to and listen for replies on. For Telegram DMs this is your numeric user ID. You can also set it later in chat with <code>/set-home</code>.</div>
+            <div style="background:rgba(210,153,34,0.1);border:1px solid var(--busy);border-radius:6px;padding:8px 10px;margin-top:12px;font-size:11px;color:var(--text-secondary);line-height:1.5">
+                <b>Use a dedicated bot for the swarm.</b> A Telegram bot token can only have one listener — if this
+                bot is already running under your own <code>hermes gateway</code>, the two will steal each other's
+                replies. Create a fresh bot for the teams.
+            </div>
+            <div id="gw-error" style="color:var(--danger);font-size:11px;margin-top:8px"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideModal('modal-gateway')">Close</button>
+            <button class="btn" onclick="saveGateway()">Save &amp; apply</button>
         </div>
     </div>
 </div>
@@ -2490,6 +2521,83 @@ async function postSetup(body) {
     } catch (e) { document.getElementById('setup-error').textContent = e.message; }
 }
 
+/* ===== MESSAGING GATEWAY SETUP ===== */
+let gatewayCatalogue = [];
+
+async function showGatewaySettings() {
+    if (!gatewayCatalogue.length) {
+        try { gatewayCatalogue = (await fetch(`${API_URL}/gateways`).then(r => r.json())).gateways || []; } catch (e) {}
+    }
+    let status = {};
+    try { status = await fetch(`${API_URL}/setup/gateway/status`).then(r => r.json()); } catch (e) {}
+    const active = status.active || {};
+    const detected = status.detected_hermes;
+
+    const sel = document.getElementById('gw-platform');
+    sel.innerHTML = gatewayCatalogue.map(g => {
+        const mark = g.status && g.status.startsWith('configured') ? ' ✓' : '';
+        const reply = g.reply_supported ? '' : ' (send-only)';
+        return `<option value="${escAttr(g.key)}">${esc(g.label)}${reply}${mark}</option>`;
+    }).join('');
+
+    const det = document.getElementById('gw-detected');
+    if (detected && detected.key) {
+        det.innerHTML = `<div style="background:rgba(63,185,80,0.1);border:1px solid var(--idle);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
+            Found a bot already configured in Hermes on this machine: <b>${esc(detected.label || detected.key)}</b>
+            <button class="btn btn-sm" style="margin-left:8px" onclick="adoptGateway()">Use this</button>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Tip: use a dedicated bot if that one is already running a gateway.</div></div>`;
+    } else {
+        det.innerHTML = '';
+    }
+
+    // Preselect the active platform (else the first reply-capable one, else first).
+    const prefer = active.key || (gatewayCatalogue.find(g => g.reply_supported) || {}).key || (gatewayCatalogue[0] || {}).key;
+    if (prefer) sel.value = prefer;
+    document.getElementById('gw-token').value = '';
+    document.getElementById('gw-home-chat').value = active.home_chat_id || '';
+    document.getElementById('gw-error').textContent = '';
+    onGatewayChange();
+    showModal('modal-gateway');
+}
+
+function onGatewayChange() {
+    const key = document.getElementById('gw-platform').value;
+    const g = gatewayCatalogue.find(x => x.key === key) || {};
+    const lbl = document.getElementById('gw-token-label');
+    lbl.textContent = g.token_var ? `Bot token (${g.token_var})` : 'Bot token';
+    const note = document.getElementById('gw-reply-note');
+    if (g.reply_supported) {
+        note.style.display = 'none';
+        note.textContent = '';
+    } else {
+        note.style.display = '';
+        note.textContent = 'Replies from chat aren’t supported for this platform yet — questions are sent out, but you answer in the dashboard inbox.';
+    }
+}
+
+async function adoptGateway() { await postGateway({ adopt_detected: true }); }
+
+async function saveGateway() {
+    const key = document.getElementById('gw-platform').value;
+    const token = document.getElementById('gw-token').value.trim();
+    const home_chat_id = document.getElementById('gw-home-chat').value.trim();
+    if (!token) { document.getElementById('gw-error').textContent = 'Enter the bot token.'; return; }
+    await postGateway({ key, token, home_chat_id });
+}
+
+async function postGateway(body) {
+    document.getElementById('gw-error').textContent = '';
+    try {
+        const d = await fetch(`${API_URL}/setup/gateway`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        }).then(r => r.json());
+        if (d.error) { document.getElementById('gw-error').textContent = d.error; return; }
+        logEvent('system', `Messaging gateway set: ${d.key}`);
+        gatewayCatalogue = [];     // force re-fetch (status marks change)
+        hideModal('modal-gateway');
+    } catch (e) { document.getElementById('gw-error').textContent = e.message; }
+}
+
 /* ===== MESSAGE PANEL ===== */
 function fmtMsgTime(ts) {
     const d = ts ? new Date(ts * 1000) : new Date();
@@ -2777,6 +2885,7 @@ const ICONS = {
     'square': '<rect x="5" y="5" width="14" height="14" rx="2"/>',
     'ban': '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
     'plus': '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    'send': '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
 };
 
 function icon(name, size = 14) {

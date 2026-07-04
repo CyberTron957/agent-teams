@@ -208,6 +208,15 @@ async def lifespan(app: FastAPI):
     prune_task = loop.create_task(_periodic_monitoring_prune())
     digest_task = loop.create_task(_periodic_digest())
     loopdet_task = loop.create_task(_periodic_loop_detector())
+
+    # Start the inbound messaging-gateway reply listener (no-op unless a
+    # reply-capable gateway is configured with a home channel). Lets the human
+    # answer ask_human questions from chat, not just the dashboard.
+    try:
+        from teams_server.gateway_bridge import start_inbox_gateway_listener
+        start_inbox_gateway_listener(app)
+    except Exception as e:
+        log.warning("[Startup] gateway reply listener failed to start: %s", e)
     try:
         from teams_server.model_config import resolve_model
 
@@ -225,6 +234,11 @@ async def lifespan(app: FastAPI):
         prune_task.cancel()
         digest_task.cancel()
         loopdet_task.cancel()
+        try:
+            from teams_server.gateway_bridge import stop_inbox_gateway_listener
+            stop_inbox_gateway_listener()
+        except Exception:
+            pass
         for name, daemon in list(daemons.items()):
             _stop_daemon(daemon)
         # Stop per-team browsers (their on-disk profiles persist for next run).
@@ -1318,6 +1332,75 @@ async def setup_model(request: Request):
         "provider": provider, "model": model, "timestamp": __import__("time").time(),
     })
     return JSONResponse({"status": "ok", "provider": provider, "model": model})
+
+
+# ---------------------------------------------------------------------------
+# Messaging gateway: forward human-inbox questions to a chat platform and accept
+# replies back. Mirrors the model setup routes above (catalogue + status + set),
+# reusing Hermes' own gateway config (see teams_server/gateway_config.py).
+# ---------------------------------------------------------------------------
+@app.get("/gateways")
+async def get_gateways():
+    """Messaging-platform catalogue for the gateway setup screen (Hermes' platforms
+    + each one's configured? status). The gateway analogue of /providers."""
+    from teams_server.gateway_config import list_gateways
+
+    return JSONResponse({"gateways": list_gateways()})
+
+
+@app.get("/setup/gateway/status")
+async def setup_gateway_status():
+    """Whether a swarm gateway is configured, plus any bot detected in ~/.hermes to
+    adopt. The gateway analogue of /setup/status (never leaks the bot token)."""
+    from teams_server.gateway_config import get_active_gateway, detect_global_gateway
+
+    active = get_active_gateway()
+    detected = detect_global_gateway()
+    return JSONResponse({
+        "configured": active is not None,
+        "active": {
+            "key": active["key"], "label": active.get("label"),
+            "home_chat_id": active.get("home_chat_id", ""),
+            "reply_supported": active["key"] == "telegram",
+        } if active else None,
+        "detected_hermes": {
+            "key": detected["key"], "label": detected.get("label"),
+        } if detected else None,
+    })
+
+
+@app.post("/setup/gateway")
+async def setup_gateway(request: Request):
+    """Set the swarm's messaging gateway (bot token + home channel) and (re)start the
+    inbound reply listener. Body: {key, token, home_chat_id} or {adopt_detected: true}.
+    The gateway analogue of POST /setup/model."""
+    from teams_server.gateway_config import set_gateway, adopt_global_gateway
+    from teams_server.gateway_bridge import start_inbox_gateway_listener
+
+    body = await request.json()
+    if body.get("adopt_detected"):
+        adopted = adopt_global_gateway()
+        if not adopted:
+            return JSONResponse({"error": "No Hermes gateway detected to adopt."}, status_code=400)
+        key = adopted["key"]
+    else:
+        key = (body.get("key") or "").strip()
+        token = (body.get("token") or "").strip()
+        home_chat_id = (body.get("home_chat_id") or "").strip()
+        if not key or not token:
+            return JSONResponse({"error": "key and token are required"}, status_code=400)
+        set_gateway(key, token, home_chat_id)
+
+    # (Re)start the inbound listener so chat replies route to agents immediately.
+    try:
+        start_inbox_gateway_listener(app)
+    except Exception as e:
+        log.warning("[gateway] listener (re)start after setup failed: %s", e)
+
+    from teams_server.websocket import _broadcast
+
+    _broadcast("gateway_updated", {"key": key, "timestamp": __import__("time").time()})
+    return JSONResponse({"status": "ok", "key": key})
 
 
 @app.get("/agent/{agent_name}/config")

@@ -911,6 +911,16 @@ def _block_on_human(daemon, caller: str, prompt: str, *, kind: str = "question")
         "kind": kind, "timestamp": time.time(),
     })
 
+    # Mirror the question out to a configured messaging gateway (Telegram/…), so
+    # the human can be notified and reply from chat without the dashboard open.
+    # Fire-and-forget on its own thread and fully guarded — the gateway must never
+    # delay or break the ask path (the question already lives in the inbox).
+    try:
+        from teams_server.gateway_bridge import forward_question
+        forward_question(qid, caller, prompt, kind)
+    except Exception as e:
+        log.debug("[%s] gateway forward skipped: %s", caller, e)
+
     # Block the worker thread waiting for an in-turn answer. If it elapses we DON'T
     # fail — the question stays pending and a late answer is re-delivered as a task.
     daemon.human_event.wait(timeout=_ASK_HUMAN_WAIT_SECONDS)
