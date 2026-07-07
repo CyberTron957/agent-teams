@@ -63,7 +63,7 @@ _PKG=""; _PKG_UPDATE=""        # filled by _pkg_setup; empty ⇒ can't auto-inst
 _pkg_setup() {
   local s=""
   if [ "$(id -u)" -ne 0 ]; then
-    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then s="sudo "; else return; fi
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then s="sudo "; else return 0; fi
   fi
   if   command -v apt-get >/dev/null 2>&1; then _PKG="${s}apt-get install -y -q"; _PKG_UPDATE="${s}apt-get update -qq"
   elif command -v dnf     >/dev/null 2>&1; then _PKG="${s}dnf install -y"
@@ -183,6 +183,11 @@ fi
 PY="$VENV/bin/python"
 [ -x "$PY" ] || die "venv python missing at $PY"
 
+# Ensure the active virtual environment's python is 3.11+
+if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)' 2>/dev/null; then
+  die "The active virtual environment ($VENV) uses Python $("$PY" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo 'unknown'), but Python 3.11+ is required."
+fi
+
 # Ensure pip is installed in the virtual environment
 if ! "$PY" -m pip --version >/dev/null 2>&1; then
   info "pip not found in venv; attempting to bootstrap it..."
@@ -294,8 +299,8 @@ if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
   ln -sf "$VENV/bin/hermes" "$HOME/.local/bin/hermes"
   info "Symlinked agent-teams and hermes to $HOME/.local/bin"
 
-  # Ensure $HOME/.local/bin is in PATH in ~/.bashrc, ~/.zshrc, or ~/.profile if it's not already
-  for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+  # Ensure $HOME/.local/bin is in PATH in ~/.bashrc, ~/.bash_profile, ~/.zshrc, or ~/.profile if it's not already
+  for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc" "$HOME/.profile"; do
     if [ -f "$f" ]; then
       if ! grep -q '\.local/bin' "$f" 2>/dev/null; then
         echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$f"
