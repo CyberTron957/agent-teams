@@ -284,6 +284,21 @@ else
   "$VENV/bin/hermes" setup || warn "hermes setup didn't finish — rerun: $VENV/bin/hermes setup"
 fi
 
+# ---- 5.5. gateway (messaging, optional) ----------------------------------
+step "Messaging Gateway (optional)"
+_gw_configured() { "$PY" -c 'import sys; from teams_server.gateway_config import is_gateway_configured; sys.exit(0 if is_gateway_configured() else 1)' 2>/dev/null; }
+if _gw_configured; then
+  info "Gateway already configured in data/.hermes-shared — ready."
+else
+  info "No messaging gateway set yet (optional)."
+  info "To forward agent ask_human questions to Telegram/Discord and reply from chat:"
+  info "  1. Create a DEDICATED bot for agent-teams (do NOT reuse your main Hermes bot)."
+  info "     Telegram: https://t.me/BotFather → /newbot → copy the token"
+  info "     Discord:  https://discord.com/developers/applications → Bot → Reset Token"
+  info "  2. Open the dashboard → Gateway button → paste the token + home chat ID → Save."
+  warn "If you reuse the same bot as your running 'hermes gateway', replies will clash."
+fi
+
 # ---- 6. verify ------------------------------------------------------------
 step "Verifying (agent-teams doctor)"
 "$VENV/bin/agent-teams" doctor || warn "doctor flagged issues above — resolve them before starting."
