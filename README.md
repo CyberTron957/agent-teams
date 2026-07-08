@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/dashboard.png" alt="Agent Teams dashboard — agent roster, supervisor graph, live execution, and cost tracking" width="720" />
+  <img src="assets/dashboard.png" alt="Agent Teams dashboard — agent roster, supervisor graph, live execution, and cost tracking" width="100%" />
 </p>
 
 <p align="center">
