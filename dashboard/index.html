@@ -874,9 +874,25 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">
                 Forward <b>human-inbox questions</b> (an agent's <code>ask_human</code> / takeover) to a chat
                 platform, and answer right from chat — the agent unblocks just as if you'd replied in the
-                dashboard. Reuses a bot you set up with <code>hermes setup gateway</code>.
+                dashboard. Requires a <b>dedicated bot</b> for agent-teams (see setup guide below).
             </div>
             <div id="gw-detected"></div>
+            <details style="margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:11px;line-height:1.6">
+                <summary style="cursor:pointer;font-weight:600;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:6px"><span data-icon="info" data-icon-size="11"></span> How to set up a dedicated bot (required)</summary>
+                <div style="margin-top:8px;color:var(--text-secondary)">
+                    <b>Why dedicated?</b> A bot token supports only one active listener. If you reuse your main Hermes bot, the two listeners will race and steal each other's replies.<br><br>
+                    <b>Telegram</b><br>
+                    1. Open <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent)">@BotFather</a> → <code>/newbot</code> → pick a name → copy the token.<br>
+                    2. Start a DM with your new bot (or add it to a group).<br>
+                    3. Get your home chat ID: message <a href="https://t.me/userinfobot" target="_blank" style="color:var(--accent)">@userinfobot</a> or use <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code> after sending a message.<br>
+                    4. Paste the token and chat ID below.<br><br>
+                    <b>Discord</b><br>
+                    1. <a href="https://discord.com/developers/applications" target="_blank" style="color:var(--accent)">discord.com/developers</a> → New Application → Bot → Reset Token → copy.<br>
+                    2. Invite the bot to your server with <code>bot</code> scope + <code>Send Messages</code> permission.<br>
+                    3. Enable Developer Mode (Settings → Advanced) → right-click your channel → Copy ID for the home chat ID.<br>
+                    4. Paste token and channel ID below. (Note: Discord bots are send-only today; replies go through the dashboard.)
+                </div>
+            </details>
             <div class="control-group"><label class="control-label" for="gw-platform">Platform</label><select class="control-select" id="gw-platform" onchange="onGatewayChange()"></select></div>
             <div id="gw-reply-note" style="font-size:11px;color:var(--busy);line-height:1.5;margin:-4px 0 10px;display:none"></div>
             <div class="control-group"><label class="control-label" for="gw-token" id="gw-token-label">Bot token</label><input class="control-input" id="gw-token" type="password" placeholder="(stored locally in Hermes .env, never committed)"></div>
@@ -2542,10 +2558,10 @@ async function showGatewaySettings() {
 
     const det = document.getElementById('gw-detected');
     if (detected && detected.key) {
-        det.innerHTML = `<div style="background:rgba(63,185,80,0.1);border:1px solid var(--idle);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
-            Found a bot already configured in Hermes on this machine: <b>${esc(detected.label || detected.key)}</b>
-            <button class="btn btn-sm" style="margin-left:8px" onclick="adoptGateway()">Use this</button>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Tip: use a dedicated bot if that one is already running a gateway.</div></div>`;
+        det.innerHTML = `<div style="background:rgba(210,153,34,0.12);border:1px solid var(--busy);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px;line-height:1.5">
+            <b>⚠️ ${esc(detected.label || detected.key)} bot found in your ~/.hermes</b><br>
+            <span style="color:var(--text-secondary)">Do <b>not</b> reuse this bot for agent-teams. A Telegram/Discord bot token supports only <b>one</b> long-polling listener — sharing it will cause replies to randomly go to the wrong app. Create a <b>dedicated bot</b> for the swarm (see instructions below) and paste its token here.</span>
+        </div>`;
     } else {
         det.innerHTML = '';
     }

@@ -11,9 +11,14 @@ per-platform "configured?" status come straight from Hermes
 (``hermes_cli.gateway._all_platforms`` / ``_platform_status``), exactly as the
 model setup reuses ``PROVIDER_REGISTRY``.
 
-Precedence for setup: the teams-wide gateway in the shared home; if none, the
-operator's existing ``~/.hermes`` bot is detected and offered to ADOPT (copy into
-the shared home) — the same detect-and-adopt flow as the model.
+The active gateway is read exclusively from the shared home (``data/.hermes-shared``).
+NO fallback to the operator's ``~/.hermes`` is performed at runtime — a Telegram/Discord
+bot token can only have one long-polling listener, so using the same bot as the operator's
+main ``hermes gateway`` would cause the two to steal each other's replies. Agent-teams
+must be configured with its OWN dedicated bot (set via the dashboard → Gateway).
+
+The operator's ``~/.hermes`` bot IS still detected and shown in the setup UI (detect_global_gateway),
+but only so the operator can see the clash risk and choose to configure a separate one.
 
 NOTE: gateway creds live in ``.env`` (env vars), NOT ``config.yaml`` — so the
 read/write path here mirrors ``model_config``'s ``.env`` helpers, not its
@@ -139,8 +144,13 @@ def _read_gateway_from_home(home: Path) -> Optional[Dict[str, Any]]:
 
 
 def get_active_gateway() -> Optional[Dict[str, Any]]:
-    """The swarm's configured gateway (from the shared home), or None. The runtime
-    bridge reads this to decide whether to forward/listen."""
+    """The swarm's configured gateway (from the shared home only), or None.
+
+    Reads ONLY from ``data/.hermes-shared`` — NOT from ``~/.hermes``.
+    A Telegram/Discord bot token supports only one long-polling listener; sharing
+    the same bot as the operator's running ``hermes gateway`` would cause the two
+    listeners to steal each other's replies. Agent-teams must be configured with
+    its own dedicated bot (set via the dashboard Gateway button)."""
     return _read_gateway_from_home(SHARED_HERMES_HOME)
 
 
