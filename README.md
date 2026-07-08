@@ -25,9 +25,6 @@
 </p>
 
 <br/>
-
----
-
 <br/>
 
 ## What did my AI team do overnight?
@@ -47,7 +44,6 @@ Agent Teams runs 24/7 on your machine or VPS. When you wake up, your agents have
 
 <br/>
 
----
 
 ## Why this exists
 
@@ -87,7 +83,6 @@ Hermes is the worker. Agent Teams is the manager, the scheduler, the budget cont
 
 <br/>
 
----
 
 <br/>
 
@@ -103,7 +98,6 @@ Hermes is the worker. Agent Teams is the manager, the scheduler, the budget cont
 
 <br/>
 
----
 
 ## How Agent Teams compares
 
@@ -120,7 +114,6 @@ Hermes is the worker. Agent Teams is the manager, the scheduler, the budget cont
 
 <br/>
 
----
 
 <br/>
 
@@ -165,12 +158,10 @@ Compliance    → Checks policy adherence, flags risks, prepares audit logs
 
 <br/>
 
----
 
 <br/>
 
 
----
 
 ## Features
 
@@ -221,7 +212,6 @@ Schedule recurring tasks. Agents wake, work, and report automatically.
 
 <br/>
 
----
 
 <br/>
 
@@ -237,7 +227,6 @@ Schedule recurring tasks. Agents wake, work, and report automatically.
 
 <br/>
 
----
 
 ## Quickstart
 
@@ -361,7 +350,6 @@ open http://127.0.0.1:8000  # open the dashboard
 
 <br/>
 
----
 
 ## CLI Reference
 
@@ -379,7 +367,6 @@ open http://127.0.0.1:8000  # open the dashboard
 
 <br/>
 
----
 
 ## FAQ
 
@@ -403,7 +390,6 @@ Every turn logs token counts (input, output, cache read). These are priced again
 
 <br/>
 
----
 
 ## Deploy on a VPS
 
@@ -411,7 +397,6 @@ See **[Deploy on a VPS](docs/deploy-vps.md)** for the hardened deployment guide 
 
 <br/>
 
----
 
 ## Development
 
@@ -427,7 +412,6 @@ agent-teams up       # start the server
 
 <br/>
 
----
 
 ## Community
 
@@ -437,7 +421,6 @@ agent-teams up       # start the server
 
 <br/>
 
----
 
 ## License
 
@@ -445,7 +428,6 @@ MIT &copy; 2026 Pradhyun
 
 <br/>
 
----
 
 <p align="center">
   <sub>Open source under MIT. Built for people who want AI agents that ship, not just chat.</sub>
