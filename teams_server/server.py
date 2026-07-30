@@ -213,6 +213,18 @@ async def lifespan(app: FastAPI):
     # reply-capable gateway is configured with a home channel). Lets the human
     # answer ask_human questions from chat, not just the dashboard.
     try:
+        # Move any gateway credential still sitting in the shared Hermes home into
+        # agent-teams' own store first. While it lives in a Hermes .env, ANY
+        # `hermes gateway run` pointed at that home starts a second listener on the
+        # same bot and can swallow replies meant for an agent.
+        from teams_server.gateway_config import (
+            apply_gateway_env, migrate_gateway_out_of_hermes_home,
+        )
+        migrate_gateway_out_of_hermes_home()
+        apply_gateway_env()
+    except Exception as e:
+        log.warning("[Startup] gateway credential migration failed: %s", e)
+    try:
         from teams_server.gateway_bridge import start_inbox_gateway_listener
         start_inbox_gateway_listener(app)
     except Exception as e:
@@ -1348,48 +1360,163 @@ async def get_gateways():
     return JSONResponse({"gateways": list_gateways()})
 
 
+@app.post("/setup/gateway/discover")
+async def setup_gateway_discover(request: Request):
+    """Look for a chat that has already messaged the given bot token. Lets setup
+    be "paste token → message the bot → done" with no numeric chat ID to hunt for.
+    Body: {token}. Returns {found, chat_id, name} — never persists anything."""
+    from teams_server.gateway_bridge import discover_home_chat
+
+    body = await request.json()
+    token = (body.get("token") or "").strip()
+    if not token:
+        return JSONResponse({"found": False})
+    found = await discover_home_chat(token)
+    if not found:
+        return JSONResponse({"found": False})
+    return JSONResponse({"found": True, **found})
+
+
 @app.get("/setup/gateway/status")
 async def setup_gateway_status():
-    """Whether a swarm gateway is configured, plus any bot detected in ~/.hermes to
-    adopt. The gateway analogue of /setup/status (never leaks the bot token)."""
+    """Whether a swarm gateway is configured, plus live inbound-listener health.
+    The gateway analogue of /setup/status (never leaks the bot token).
+
+    ``inbound.user_message`` is the plain-English health line the dashboard
+    renders. Conflicts with another gateway process are detected and
+    self-resolved when they involve agent-teams' own leftover services (see
+    ``gateway_bridge.auto_disable_own_gateway_service``); the dashboard inbox
+    keeps working regardless, so there's nothing left for the user to debug.
+
+    ``has_main_hermes`` only says whether the operator also runs a separate
+    Hermes install with its OWN bot already configured — enough for the
+    dashboard to mention "you'll need a second bot for that", without ever
+    naming or touching that other bot."""
     from teams_server.gateway_config import get_active_gateway, detect_global_gateway
+    from teams_server.gateway_bridge import get_listener_health
 
     active = get_active_gateway()
-    detected = detect_global_gateway()
+    has_main_hermes = False
+    try:
+        has_main_hermes = bool((detect_global_gateway() or {}).get("token"))
+    except Exception:
+        pass
     return JSONResponse({
         "configured": active is not None,
         "active": {
             "key": active["key"], "label": active.get("label"),
             "home_chat_id": active.get("home_chat_id", ""),
+            "home_chat_name": active.get("home_chat_name", ""),
+            "bot_username": active.get("bot_username", ""),
             "reply_supported": active["key"] == "telegram",
         } if active else None,
-        "detected_hermes": {
-            "key": detected["key"], "label": detected.get("label"),
-        } if detected else None,
+        "inbound": get_listener_health(),
+        "has_main_hermes": has_main_hermes,
     })
 
 
 @app.post("/setup/gateway")
 async def setup_gateway(request: Request):
-    """Set the swarm's messaging gateway (bot token + home channel) and (re)start the
-    inbound reply listener. Body: {key, token, home_chat_id} or {adopt_detected: true}.
-    The gateway analogue of POST /setup/model."""
-    from teams_server.gateway_config import set_gateway, adopt_global_gateway
-    from teams_server.gateway_bridge import start_inbox_gateway_listener
+    """Set the swarm's messaging gateway (bot token + home channel) and (re)start
+    the inbound reply listener. Body: {key, token, home_chat_id, delete_webhook?}.
+
+    The main Hermes gateway is intentionally never adoptable: one bot token has
+    one update stream, so copying it would create two listeners and lose replies.
+    Telegram tokens are verified with getMe before saving; a registered webhook is
+    reported rather than removed automatically because removal needs consent
+    (delete_webhook=true)."""
+    from teams_server.gateway_config import set_gateway
+    from teams_server.gateway_bridge import (
+        start_inbox_gateway_listener, preflight_telegram, delete_telegram_webhook,
+    )
 
     body = await request.json()
+    warning = ""
+    # Explicitly reject stale/hand-crafted requests from older dashboard builds;
+    # removing the button alone would leave an unsafe API path behind.
     if body.get("adopt_detected"):
-        adopted = adopt_global_gateway()
-        if not adopted:
-            return JSONResponse({"error": "No Hermes gateway detected to adopt."}, status_code=400)
-        key = adopted["key"]
-    else:
-        key = (body.get("key") or "").strip()
-        token = (body.get("token") or "").strip()
-        home_chat_id = (body.get("home_chat_id") or "").strip()
-        if not key or not token:
-            return JSONResponse({"error": "key and token are required"}, status_code=400)
-        set_gateway(key, token, home_chat_id)
+        return JSONResponse({
+            "error": (
+                "Adopting your main Hermes bot is not supported. A bot token allows "
+                "only one listener, so agent-teams requires its own dedicated bot."
+            ),
+            "reason": "gateway_adoption_removed",
+        }, status_code=400)
+
+    key = (body.get("key") or "").strip()
+    token = (body.get("token") or "").strip()
+    home_chat_id = (body.get("home_chat_id") or "").strip()
+    bot_username = ""
+    home_chat_name = ""
+    if not key or not token:
+        return JSONResponse({"error": "key and token are required"}, status_code=400)
+
+    if key == "telegram":
+        # Prevention: reusing the operator's main Hermes bot guarantees this
+        # exact failure, because that profile's gateway polls the same token.
+        # Refuse instead of warning — a saved config that cannot work is worse
+        # than a rejected one. Kept as plain language; no technical detail.
+        try:
+            from teams_server.gateway_config import detect_global_gateway as _dgg
+            other = _dgg()
+        except Exception:
+            other = None
+        if other and (other.get("token") or "") == token:
+            return JSONResponse({
+                "error": (
+                    "That bot is already connected to your other Hermes app. Each app "
+                    "needs its own bot — create a new one with @BotFather and paste "
+                    "that token instead."
+                ),
+                "reason": "token_shared_with_hermes",
+            }, status_code=409)
+
+        pf = await preflight_telegram(token)
+        if pf.get("error") and not pf.get("ok"):
+            # Hard-invalid token → refuse. Unreachable network → warn only.
+            if "Could not reach Telegram" in pf["error"]:
+                warning = "Could not verify the bot right now — saved anyway."
+            else:
+                return JSONResponse({
+                    "error": "That doesn't look like a valid bot token. Double-check "
+                             "you copied it fully from @BotFather.",
+                }, status_code=400)
+        bot_username = pf.get("bot_username") or ""
+        webhook_url = pf.get("webhook_url") or ""
+        if webhook_url:
+            if not body.get("delete_webhook"):
+                return JSONResponse({
+                    "error": (
+                        "This bot is already connected somewhere else. Continue anyway?"
+                    ),
+                    "webhook_url": webhook_url,
+                    "needs_webhook_removal": True,
+                }, status_code=409)
+            ok, err = await delete_telegram_webhook(token)
+            if not ok:
+                return JSONResponse(
+                    {"error": "Couldn't finish connecting that bot. Please try again."},
+                    status_code=400)
+            log.info("[gateway] removed Telegram webhook at user request "
+                     "so long polling can receive replies")
+
+        # Auto-discover the home chat instead of asking the user to find a
+        # numeric ID: if they've already messaged the new bot, Telegram still
+        # has that message buffered and we can read the sender's chat id from it.
+        if not home_chat_id:
+            from teams_server.gateway_bridge import discover_home_chat
+
+            found = await discover_home_chat(token)
+            if found:
+                home_chat_id = found["chat_id"]
+                home_chat_name = found.get("name", "")
+            else:
+                return JSONResponse({
+                    "error": "Send any message to your bot on Telegram, then try again.",
+                    "needs_first_message": True,
+                }, status_code=409)
+
+    set_gateway(key, token, home_chat_id, bot_username, home_chat_name)
 
     # (Re)start the inbound listener so chat replies route to agents immediately.
     try:
@@ -1400,7 +1527,30 @@ async def setup_gateway(request: Request):
     from teams_server.websocket import _broadcast
 
     _broadcast("gateway_updated", {"key": key, "timestamp": __import__("time").time()})
-    return JSONResponse({"status": "ok", "key": key})
+    resp = {
+        "status": "ok", "key": key, "home_chat_id": home_chat_id,
+        "bot_username": bot_username, "home_chat_name": home_chat_name,
+    }
+    if warning:
+        resp["warning"] = warning
+    return JSONResponse(resp)
+
+
+@app.delete("/setup/gateway")
+async def delete_gateway():
+    """Disconnect the swarm's messaging gateway: stop the inbound listener and
+    remove the stored bot credential. Questions from agents fall back to the
+    dashboard inbox only — nothing else changes."""
+    from teams_server.gateway_config import clear_gateway
+    from teams_server.gateway_bridge import stop_inbox_gateway_listener
+
+    stop_inbox_gateway_listener()
+    clear_gateway()
+
+    from teams_server.websocket import _broadcast
+
+    _broadcast("gateway_updated", {"key": "", "timestamp": __import__("time").time()})
+    return JSONResponse({"status": "ok"})
 
 
 @app.get("/agent/{agent_name}/config")

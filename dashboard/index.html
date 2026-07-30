@@ -643,7 +643,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             ">0</span>
         </button>
         <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" aria-label="Model settings" title="Default model for all agents"><span data-icon="cpu" data-icon-size="13"></span> <span class="tb-label">Model</span></button>
-        <button class="btn btn-sm btn-secondary" onclick="showGatewaySettings()" aria-label="Messaging gateway" title="Forward inbox questions to Telegram/Discord and reply from chat"><span data-icon="send" data-icon-size="13"></span> <span class="tb-label">Gateway</span></button>
+        <button class="btn btn-sm btn-secondary" onclick="showGatewaySettings()" aria-label="Telegram" title="Get agent questions on Telegram and reply from chat"><span data-icon="send" data-icon-size="13"></span> <span class="tb-label">Telegram</span></button>
         <button class="btn btn-sm btn-secondary" onclick="openBrowserPanel(currentTeam)" aria-label="Open team browser" title="Watch & control this team's browser live"><span data-icon="globe" data-icon-size="13"></span> <span class="tb-label">Browser</span></button>
         <button id="team-pause-btn" class="btn btn-sm btn-secondary" data-mode="pause" onclick="toggleTeamPause()" style="display:none" aria-label="Pause team" title="Freeze every agent on this team"><span data-icon="clock" data-icon-size="13"></span> <span class="tb-label">Pause team</span></button>
         <label for="team-select" class="sr-only">Team</label>
@@ -868,46 +868,43 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 
 <!-- Messaging Gateway Modal -->
 <div class="modal-bg" id="modal-gateway">
-    <div class="modal" style="width:480px" role="dialog" aria-modal="true" aria-labelledby="mh-gateway">
-        <div class="modal-header" id="mh-gateway"><span data-icon="send" data-icon-size="14"></span> Messaging gateway</div>
+    <div class="modal" style="width:460px" role="dialog" aria-modal="true" aria-labelledby="mh-gateway">
+        <div class="modal-header" id="mh-gateway"><span data-icon="send" data-icon-size="14"></span> Telegram</div>
         <div class="modal-body">
-            <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">
-                Forward <b>human-inbox questions</b> (an agent's <code>ask_human</code> / takeover) to a chat
-                platform, and answer right from chat — the agent unblocks just as if you'd replied in the
-                dashboard. Requires a <b>dedicated bot</b> for agent-teams (see setup guide below).
-            </div>
-            <div id="gw-detected"></div>
-            <details style="margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:11px;line-height:1.6">
-                <summary style="cursor:pointer;font-weight:600;color:var(--text-secondary);list-style:none;display:flex;align-items:center;gap:6px"><span data-icon="info" data-icon-size="11"></span> How to set up a dedicated bot (required)</summary>
-                <div style="margin-top:8px;color:var(--text-secondary)">
-                    <b>Why dedicated?</b> A bot token supports only one active listener. If you reuse your main Hermes bot, the two listeners will race and steal each other's replies.<br><br>
-                    <b>Telegram</b><br>
-                    1. Open <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent)">@BotFather</a> → <code>/newbot</code> → pick a name → copy the token.<br>
-                    2. Start a DM with your new bot (or add it to a group).<br>
-                    3. Get your home chat ID: message <a href="https://t.me/userinfobot" target="_blank" style="color:var(--accent)">@userinfobot</a> or use <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code> after sending a message.<br>
-                    4. Paste the token and chat ID below.<br><br>
-                    <b>Discord</b><br>
-                    1. <a href="https://discord.com/developers/applications" target="_blank" style="color:var(--accent)">discord.com/developers</a> → New Application → Bot → Reset Token → copy.<br>
-                    2. Invite the bot to your server with <code>bot</code> scope + <code>Send Messages</code> permission.<br>
-                    3. Enable Developer Mode (Settings → Advanced) → right-click your channel → Copy ID for the home chat ID.<br>
-                    4. Paste token and channel ID below. (Note: Discord bots are send-only today; replies go through the dashboard.)
+            <div id="gw-status"></div>
+
+            <div id="gw-setup">
+                <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px">
+                    When an agent needs your input, it can message you on Telegram instead of
+                    waiting in the dashboard. Reply right from the chat and the agent picks up
+                    where it left off.
                 </div>
-            </details>
-            <div class="control-group"><label class="control-label" for="gw-platform">Platform</label><select class="control-select" id="gw-platform" onchange="onGatewayChange()"></select></div>
-            <div id="gw-reply-note" style="font-size:11px;color:var(--busy);line-height:1.5;margin:-4px 0 10px;display:none"></div>
-            <div class="control-group"><label class="control-label" for="gw-token" id="gw-token-label">Bot token</label><input class="control-input" id="gw-token" type="password" placeholder="(stored locally in Hermes .env, never committed)"></div>
-            <div class="control-group"><label class="control-label" for="gw-home-chat">Home chat ID</label><input class="control-input" id="gw-home-chat" placeholder="e.g. 123456789 (your DM) or -100… (a group)"></div>
-            <div style="font-size:11px;color:var(--text-muted);line-height:1.5">The chat we deliver questions to and listen for replies on. For Telegram DMs this is your numeric user ID. You can also set it later in chat with <code>/set-home</code>.</div>
-            <div style="background:rgba(210,153,34,0.1);border:1px solid var(--busy);border-radius:6px;padding:8px 10px;margin-top:12px;font-size:11px;color:var(--text-secondary);line-height:1.5">
-                <b>Use a dedicated bot for the swarm.</b> A Telegram bot token can only have one listener — if this
-                bot is already running under your own <code>hermes gateway</code>, the two will steal each other's
-                replies. Create a fresh bot for the teams.
+                <div id="gw-second-bot-note" style="display:none;font-size:12px;color:var(--text-secondary);line-height:1.6;background:rgba(210,153,34,0.1);border:1px solid var(--busy);border-radius:6px;padding:8px 10px;margin-bottom:12px">
+                    You already have a bot connected to your other Hermes app. Agent Teams needs
+                    its own, separate bot — you'll create a new one below, it only takes a minute.
+                </div>
+                <ol style="font-size:12px;color:var(--text-secondary);line-height:1.7;margin:0 0 14px;padding-left:20px">
+                    <li>Open Telegram and message <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent)">@BotFather</a>, send <code>/newbot</code>, and follow the prompts.</li>
+                    <li>BotFather gives you a token — copy it and paste it below.</li>
+                    <li>Send your new bot any message (like "hi") so it knows where to reply.</li>
+                </ol>
+                <div class="control-group"><label class="control-label" for="gw-token">Bot token</label><input class="control-input" id="gw-token" type="password" placeholder="paste the token from @BotFather"></div>
+                <div id="gw-error" style="color:var(--danger);font-size:12px;margin-top:4px;line-height:1.5"></div>
             </div>
-            <div id="gw-error" style="color:var(--danger);font-size:11px;margin-top:8px"></div>
+
+            <div id="gw-connected" style="display:none">
+                <div id="gw-connected-summary" style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:10px"></div>
+                <div style="font-size:12px;color:var(--text-secondary);line-height:1.6">
+                    Questions from your agents go to that chat, and any reply you send there
+                    goes straight back to the agent — the dashboard inbox still works too, so
+                    you can use whichever is handy.
+                </div>
+            </div>
         </div>
         <div class="modal-footer">
+            <button id="gw-disconnect-btn" class="btn btn-secondary" onclick="disconnectGateway()" style="display:none">Disconnect</button>
             <button class="btn btn-secondary" onclick="hideModal('modal-gateway')">Close</button>
-            <button class="btn" onclick="saveGateway()">Save &amp; apply</button>
+            <button id="gw-primary-btn" class="btn" onclick="saveGateway()">Connect</button>
         </div>
     </div>
 </div>
@@ -2537,81 +2534,119 @@ async function postSetup(body) {
     } catch (e) { document.getElementById('setup-error').textContent = e.message; }
 }
 
-/* ===== MESSAGING GATEWAY SETUP ===== */
-let gatewayCatalogue = [];
-
+/* ===== MESSAGING GATEWAY SETUP (Telegram) =====
+   One platform (Telegram, the only one that can receive replies), no manual
+   chat-ID entry (auto-discovered from the user's first message to the bot).
+   Health text is a single plain-English sentence from the server — never a
+   pid, a command, or the word "conflict" — because the dashboard inbox is
+   always a working fallback, so there is nothing for a non-technical user to
+   diagnose here. The modal DOES explain what the feature does, what it's
+   connected to, and when a second bot is needed — simplicity isn't the same
+   as silence. */
 async function showGatewaySettings() {
-    if (!gatewayCatalogue.length) {
-        try { gatewayCatalogue = (await fetch(`${API_URL}/gateways`).then(r => r.json())).gateways || []; } catch (e) {}
-    }
     let status = {};
     try { status = await fetch(`${API_URL}/setup/gateway/status`).then(r => r.json()); } catch (e) {}
     const active = status.active || {};
-    const detected = status.detected_hermes;
+    const health = status.inbound || {};
 
-    const sel = document.getElementById('gw-platform');
-    sel.innerHTML = gatewayCatalogue.map(g => {
-        const mark = g.status && g.status.startsWith('configured') ? ' ✓' : '';
-        const reply = g.reply_supported ? '' : ' (send-only)';
-        return `<option value="${escAttr(g.key)}">${esc(g.label)}${reply}${mark}</option>`;
-    }).join('');
+    renderGatewayStatusBanner(health, active);
+    renderGatewayConnectedSummary(active);
 
-    const det = document.getElementById('gw-detected');
-    if (detected && detected.key) {
-        det.innerHTML = `<div style="background:rgba(210,153,34,0.12);border:1px solid var(--busy);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px;line-height:1.5">
-            <b>⚠️ ${esc(detected.label || detected.key)} bot found in your ~/.hermes</b><br>
-            <span style="color:var(--text-secondary)">Do <b>not</b> reuse this bot for agent-teams. A Telegram/Discord bot token supports only <b>one</b> long-polling listener — sharing it will cause replies to randomly go to the wrong app. Create a <b>dedicated bot</b> for the swarm (see instructions below) and paste its token here.</span>
-        </div>`;
-    } else {
-        det.innerHTML = '';
-    }
+    const isConnected = !!active.key;
+    document.getElementById('gw-setup').style.display = isConnected ? 'none' : '';
+    document.getElementById('gw-connected').style.display = isConnected ? '' : 'none';
+    document.getElementById('gw-primary-btn').style.display = isConnected ? 'none' : '';
+    document.getElementById('gw-disconnect-btn').style.display = isConnected ? '' : 'none';
 
-    // Preselect the active platform (else the first reply-capable one, else first).
-    const prefer = active.key || (gatewayCatalogue.find(g => g.reply_supported) || {}).key || (gatewayCatalogue[0] || {}).key;
-    if (prefer) sel.value = prefer;
+    // Only worth mentioning when it's actually true — most users running just
+    // Agent Teams never see this line at all.
+    const secondBotNote = document.getElementById('gw-second-bot-note');
+    if (secondBotNote) secondBotNote.style.display = (!isConnected && status.has_main_hermes) ? '' : 'none';
+
     document.getElementById('gw-token').value = '';
-    document.getElementById('gw-home-chat').value = active.home_chat_id || '';
     document.getElementById('gw-error').textContent = '';
-    onGatewayChange();
     showModal('modal-gateway');
 }
 
-function onGatewayChange() {
-    const key = document.getElementById('gw-platform').value;
-    const g = gatewayCatalogue.find(x => x.key === key) || {};
-    const lbl = document.getElementById('gw-token-label');
-    lbl.textContent = g.token_var ? `Bot token (${g.token_var})` : 'Bot token';
-    const note = document.getElementById('gw-reply-note');
-    if (g.reply_supported) {
-        note.style.display = 'none';
-        note.textContent = '';
-    } else {
-        note.style.display = '';
-        note.textContent = 'Replies from chat aren’t supported for this platform yet — questions are sent out, but you answer in the dashboard inbox.';
+// One calm sentence, straight from the server's user_message — never a pid,
+// a command, or the word "conflict". The dashboard inbox is always a working
+// fallback, so there is never a reason to alarm the user here.
+function renderGatewayStatusBanner(health, active) {
+    const el = document.getElementById('gw-status');
+    if (!el) return;
+    if (!active || !active.key) { el.innerHTML = ''; return; }
+    const ok = health.state === 'live';
+    const bg = ok ? 'rgba(62,207,142,0.12)' : 'rgba(210,153,34,0.12)';
+    const bd = ok ? 'var(--idle)' : 'var(--busy)';
+    const icon = ok ? '✅' : '⏳';
+    el.innerHTML = `<div style="background:${bg};border:1px solid ${bd};border-radius:6px;padding:8px 10px;margin-bottom:14px;font-size:12px">
+        ${icon} ${esc(health.user_message || 'Connected.')}
+    </div>`;
+}
+
+// What it's actually connected to — the bot's @username and who it replies
+// to — so "connected" isn't a bare, unverifiable word.
+function renderGatewayConnectedSummary(active) {
+    const el = document.getElementById('gw-connected-summary');
+    if (!el || !active || !active.key) return;
+    const bot = active.bot_username ? `@${active.bot_username}` : 'your bot';
+    const chat = active.home_chat_name || 'your chat';
+    el.innerHTML = `Connected to <b>${esc(bot)}</b>, replying in the chat with <b>${esc(chat)}</b>.`;
+}
+
+async function saveGateway() {
+    const token = document.getElementById('gw-token').value.trim();
+    const errEl = document.getElementById('gw-error');
+    errEl.textContent = '';
+    if (!token) { errEl.textContent = 'Paste your bot token from @BotFather.'; return; }
+
+    const btn = document.getElementById('gw-primary-btn');
+    btn.disabled = true;
+    btn.textContent = 'Connecting…';
+    try {
+        await postGateway({ key: 'telegram', token });
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Connect';
     }
 }
 
-async function adoptGateway() { await postGateway({ adopt_detected: true }); }
+async function postGateway(body) {
+    const errEl = document.getElementById('gw-error');
+    errEl.textContent = '';
+    try {
+        const res = await fetch(`${API_URL}/setup/gateway`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const d = await res.json();
 
-async function saveGateway() {
-    const key = document.getElementById('gw-platform').value;
-    const token = document.getElementById('gw-token').value.trim();
-    const home_chat_id = document.getElementById('gw-home-chat').value.trim();
-    if (!token) { document.getElementById('gw-error').textContent = 'Enter the bot token.'; return; }
-    await postGateway({ key, token, home_chat_id });
+        // The bot is already connected elsewhere (webhook) — ask once, plainly.
+        if (res.status === 409 && d.needs_webhook_removal) {
+            const proceed = confirm(`${d.error}`);
+            if (!proceed) { errEl.textContent = d.error; return; }
+            return await postGateway({ ...body, delete_webhook: true });
+        }
+        // Nobody has messaged the bot yet — we can't find a chat to reply to.
+        if (res.status === 409 && d.needs_first_message) {
+            errEl.textContent = d.error;
+            return;
+        }
+        if (d.error) { errEl.textContent = d.error; return; }
+
+        logEvent('system', d.bot_username ? `Telegram connected: @${d.bot_username}` : 'Telegram connected.');
+        hideModal('modal-gateway');
+    } catch (e) { errEl.textContent = "Couldn't connect right now. Please try again."; }
 }
 
-async function postGateway(body) {
-    document.getElementById('gw-error').textContent = '';
+async function disconnectGateway() {
+    if (!confirm('Disconnect Telegram? Questions from agents will only appear in the dashboard.')) return;
     try {
-        const d = await fetch(`${API_URL}/setup/gateway`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-        }).then(r => r.json());
-        if (d.error) { document.getElementById('gw-error').textContent = d.error; return; }
-        logEvent('system', `Messaging gateway set: ${d.key}`);
-        gatewayCatalogue = [];     // force re-fetch (status marks change)
+        await fetch(`${API_URL}/setup/gateway`, { method: 'DELETE' });
+        logEvent('system', 'Telegram disconnected.');
         hideModal('modal-gateway');
-    } catch (e) { document.getElementById('gw-error').textContent = e.message; }
+    } catch (e) {
+        document.getElementById('gw-error').textContent = "Couldn't disconnect right now. Please try again.";
+    }
 }
 
 /* ===== MESSAGE PANEL ===== */

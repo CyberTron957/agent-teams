@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -12,19 +13,70 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("teams.config")
 
+# Bot tokens appear inside request URLs (e.g. Telegram's
+# ``https://api.telegram.org/bot<token>/getUpdates``), and third-party libraries
+# such as httpx log full URLs at INFO. A leaked token is full control of the
+# user's bot, and logs are routinely pasted into bug reports — so scrub tokens
+# from every record before any handler formats it.
+_TOKEN_PATTERNS = (
+    # Telegram-style URL segment: /bot123456789:AA... → /bot<redacted>
+    re.compile(r"/bot(\d{5,}:[A-Za-z0-9_\-]{20,})"),
+    # A bare Telegram token anywhere in the message.
+    re.compile(r"\b\d{5,}:[A-Za-z0-9_\-]{30,}\b"),
+    # Discord/Slack style bearer-ish secrets in query strings.
+    re.compile(r"([?&](?:token|api_key|access_token)=)[^&\s]+"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace anything that looks like a bot token / API secret with a marker.
+    Safe to call on arbitrary strings; never raises."""
+    try:
+        out = _TOKEN_PATTERNS[0].sub("/bot<redacted>", text)
+        out = _TOKEN_PATTERNS[1].sub("<redacted-token>", out)
+        out = _TOKEN_PATTERNS[2].sub(r"\1<redacted>", out)
+        return out
+    except Exception:
+        return text
+
+
+class _RedactSecretsFilter(logging.Filter):
+    """Scrubs secrets from the formatted message of every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            # Render args in now so the redaction also covers %-substituted values,
+            # then clear args so downstream formatting is a no-op.
+            msg = record.getMessage()
+            clean = redact_secrets(msg)
+            if clean != msg:
+                record.msg = clean
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
 
 def configure_logging(level: int = logging.INFO) -> None:
     """Set up root logging once for an entry point. Always logs to stdout
     (captured by Docker / journald); if TEAMS_LOG_FILE is set, ALSO writes to a
-    rotating file (10 MB × 5) so a bare-metal 24/7 run keeps an on-disk trail."""
+    rotating file (10 MB × 5) so a bare-metal 24/7 run keeps an on-disk trail.
+
+    Also installs a redaction filter so bot tokens never reach a log sink, and
+    quiets httpx's per-request INFO chatter (one line per long-poll)."""
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s",
                             datefmt="%H:%M:%S")
     root = logging.getLogger()
     root.setLevel(level)
+    redactor = _RedactSecretsFilter()
     if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         root.addHandler(sh)
+    # httpx logs the full request URL (token included) once per poll — at 30s
+    # long-poll intervals that is pure noise plus a credential leak.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     log_file = os.environ.get("TEAMS_LOG_FILE", "").strip()
     if log_file and not any(getattr(h, "_teams_file", False) for h in root.handlers):
         try:
@@ -32,11 +84,17 @@ def configure_logging(level: int = logging.INFO) -> None:
             Path(log_file).parent.mkdir(parents=True, exist_ok=True)
             fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5)
             fh.setFormatter(fmt)
+            fh.addFilter(redactor)
             fh._teams_file = True
             root.addHandler(fh)
             log.info("Logging to %s (rotating 10MB × 5)", log_file)
         except Exception as e:
             log.warning("Could not open TEAMS_LOG_FILE %s: %s", log_file, e)
+    # Apply redaction to EVERY root handler (including any the web server or a
+    # host process installed), so no sink can print a token.
+    for h in root.handlers:
+        if not any(isinstance(f, _RedactSecretsFilter) for f in h.filters):
+            h.addFilter(_RedactSecretsFilter())
 
 
 def ensure_hermes_importable() -> None:
