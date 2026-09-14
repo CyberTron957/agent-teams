@@ -359,6 +359,36 @@ SWEEP_PAYLOAD_AGE_ENABLED = os.environ.get(
     "TEAMS_SWEEP_PAYLOAD_AGE_ENABLED", "1").lower() not in ("0", "false", "no")
 SWEEP_PAYLOAD_KEEP_RECENT = int(os.environ.get("TEAMS_SWEEP_PAYLOAD_KEEP_RECENT", "2"))
 SWEEP_PAYLOAD_MIN_CHARS = int(os.environ.get("TEAMS_SWEEP_PAYLOAD_MIN_CHARS", "500"))
+# Quantize the sweep-stub boundary: without it, each new sweep stubs exactly
+# one more payload (keep_recent constant, list grows by one per turn), so the
+# first-changed byte of the prefix creeps ~1 sweep earlier EVERY turn and the
+# tail is re-billed uncached each time. Stubbing only whole quantum-sized
+# groups makes the boundary jump once per QUANTUM sweeps, then hold.
+SWEEP_PAYLOAD_AGE_QUANTUM = int(os.environ.get("TEAMS_SWEEP_PAYLOAD_AGE_QUANTUM", "3"))
+
+# Wake-payload counterpart: a worker's history is dominated by its own past
+# batch envelopes ("You have N new message(s)" — cron instructions, peer
+# deliveries). Measured on one cron-driven agent: 99.5% of user-role history
+# chars were already-processed wake instructions re-billed verbatim every
+# turn. At replay, envelopes past the cutoff keep only their sender headers
+# + a short payload preview; the outcome lives in the task store / decision
+# log / the RESULT that followed. KEEP_RECENT and QUANTUM are deliberately
+# SHARED with tool-result aging (TOOL_RESULT_AGE_*): one cutoff index means
+# both passes move the cache boundary on the same turn instead of two
+# independent boundaries busting the prefix on different turns.
+WAKE_PAYLOAD_AGE_ENABLED = os.environ.get(
+    "TEAMS_WAKE_PAYLOAD_AGE_ENABLED", "1").lower() not in ("0", "false", "no")
+WAKE_PAYLOAD_MIN_CHARS = int(os.environ.get("TEAMS_WAKE_PAYLOAD_MIN_CHARS", "400"))
+WAKE_PAYLOAD_PREVIEW_CHARS = int(os.environ.get("TEAMS_WAKE_PAYLOAD_PREVIEW_CHARS", "220"))
+
+# Per-turn observability: embedding the full replayed history in EVERY
+# llm_traces row is O(N²) storage (measured: 138 MB of a 205 MB monitoring.db;
+# ~120 MB written in one day by one cron-heavy agent). Default stores only a
+# small ref (sha1 + message/char counts) in history_json; failed turns still
+# persist the full snapshot for forensics. Set TEAMS_TRACE_FULL_HISTORY=1 for
+# the old always-store behavior.
+TRACE_FULL_HISTORY = os.environ.get(
+    "TEAMS_TRACE_FULL_HISTORY", "0").lower() not in ("0", "false", "no")
 
 # ---------------------------------------------------------------------------
 # Live-context size caps. The live block is rebuilt fresh each turn AND rides

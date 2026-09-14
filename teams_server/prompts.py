@@ -21,6 +21,7 @@ diagram / member list).
 """
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from teams_server.config import (
@@ -935,6 +936,17 @@ def strip_stale_live_context(text: str) -> str:
     return out
 
 
+def _quantized_cutoff(n: int, keep_recent: int, quantum: int) -> int:
+    """Shared cache-stable boundary for the history-aging passes.
+
+    The cutoff only advances in `quantum`-sized steps, so a provider prompt
+    cache survives ~quantum appended messages instead of busting on every
+    turn. Returns 0 when aging shouldn't run at all."""
+    if n <= keep_recent or keep_recent < 0 or quantum <= 0:
+        return 0
+    return ((n - keep_recent) // quantum) * quantum
+
+
 # Marker prefix for an aged-out tool result. Doubles as the idempotency guard:
 # a stub starts with this and is far shorter than any min_chars threshold, so
 # it can never be re-stubbed.
@@ -966,10 +978,7 @@ def age_stale_tool_results(
       so pairing with the assistant's tool_calls stays intact.
     - Idempotent; returns the original list object if nothing changed.
     """
-    n = len(messages)
-    if n <= keep_recent or keep_recent < 0 or quantum <= 0:
-        return messages
-    cutoff = ((n - keep_recent) // quantum) * quantum
+    cutoff = _quantized_cutoff(len(messages), keep_recent, quantum)
     if cutoff <= 0:
         return messages
     out: List[Dict[str, Any]] = []
@@ -1004,6 +1013,7 @@ def age_stale_sweep_payloads(
     messages: List[Dict[str, Any]],
     keep_recent: int,
     min_chars: int,
+    quantum: int = 1,
 ) -> List[Dict[str, Any]]:
     """Replace OLD supervisor-sweep payloads in replayed history with a stub.
 
@@ -1019,6 +1029,12 @@ def age_stale_sweep_payloads(
     handled separately by strip_stale_live_context), provided the elided tail
     exceeds `min_chars`. The stub does not contain the marker, so the pass is
     idempotent and stubbed messages stop counting toward `keep_recent`.
+
+    `quantum` batches the boundary: only whole quantum-sized groups of stale
+    payloads are stubbed. Without it each new sweep stubs exactly one more
+    payload, so the first-changed byte of the prefix creeps one message
+    earlier EVERY turn — re-billing the tail uncached each time. With it, the
+    boundary jumps once per `quantum` sweeps, then holds.
     Returns the original list object if nothing changed."""
     if keep_recent < 0 or not messages:
         return messages
@@ -1029,6 +1045,8 @@ def age_stale_sweep_payloads(
         and SWEEP_PAYLOAD_MARKER in m["content"]
     ]
     stale = payload_idx[:-keep_recent] if keep_recent else payload_idx
+    if quantum > 1:
+        stale = stale[: (len(stale) // quantum) * quantum]
     if not stale:
         return messages
     out = list(messages)
@@ -1040,6 +1058,101 @@ def age_stale_sweep_payloads(
             continue
         out[i] = {**out[i], "content": content[:pos] + SWEEP_PAYLOAD_ELIDED_STUB}
         changed = True
+    return out if changed else messages
+
+
+# ── Wake-payload aging (worker agents) ─────────────────────────────────────
+# A worker's user-role history is dominated by already-PROCESSED batch
+# envelopes — "You have N new message(s)" carrying cron instructions, peer
+# deliveries, nudges. Measured on a cron-driven agent: 99.5% of user-role
+# history chars were these dead wake instructions re-billed verbatim every
+# turn (live-context inside them is already stubbed; the envelope itself was
+# not). Unlike a peer RESULT a wake instruction carries no data the agent
+# still needs — what it DID about it lives in the task store, the decision
+# log, and the assistant turns that followed.
+
+# Matches the batch-envelope line build_batch_prompt emits.
+_BATCH_HEADER_RE = re.compile(r"You have \d+ new message\(s\)")
+
+# Matches one task's section header inside the envelope:
+#   "--- [3] from web-research-agent ---" (optionally + REDELIVERY_NOTE)
+_BATCH_SECTION_RE = re.compile(r"(?m)^--- \[\d+\] from [^\n]*? ---$")
+
+# Written at the end of a truncated payload. Doubles as the idempotency
+# guard: a stubbed message contains this mark and is never re-processed.
+WAKE_PAYLOAD_ELIDED_MARK = "[…wake payload archived"
+
+
+def _age_one_batch_envelope(content: str, preview_chars: int) -> str:
+    """Stub ONE stored batch envelope: keep the header line and each section's
+    sender header + a short payload preview; elide the rest.
+
+    The preview (~first line or two) keeps the load-bearing bracket tags —
+    [SCHEDULED WAKE-UP …], [TASK · id=… · from X], [QUESTION · id=…] — so the
+    replayed history still shows WHAT arrived and from whom; only the bulk of
+    the (already executed) instruction is removed. Returns the original string
+    when the message isn't a batch envelope or nothing would be saved."""
+    hm = _BATCH_HEADER_RE.search(content)
+    if not hm:
+        return content
+    if WAKE_PAYLOAD_ELIDED_MARK in content:
+        return content
+    head = content[:hm.end()]
+    rest = content[hm.end():]
+    headers = _BATCH_SECTION_RE.findall(rest)
+    if not headers:
+        return content
+    bodies = _BATCH_SECTION_RE.split(rest)
+    rebuilt = head + bodies[0]
+    for hdr, body in zip(headers, bodies[1:]):
+        rebuilt += hdr + "\n"
+        if len(body) > preview_chars:
+            rebuilt += (
+                body[:preview_chars].rstrip() + "\n"
+                + WAKE_PAYLOAD_ELIDED_MARK
+                + " — this wake was already processed; what it did lives in "
+                "the task store, the decision log, and the turn that "
+                "followed]\n\n"
+            )
+        else:
+            rebuilt += body
+    return rebuilt if len(rebuilt) < len(content) else content
+
+
+def age_stale_wake_payloads(
+    messages: List[Dict[str, Any]],
+    keep_recent: int,
+    min_chars: int,
+    quantum: int,
+    preview_chars: int,
+) -> List[Dict[str, Any]]:
+    """Trim OLD batch envelopes in replayed history to header + preview.
+
+    Same rules as age_stale_tool_results: only messages before the quantized
+    cutoff are touched (the recent working set is verbatim), the boundary
+    advances in `quantum` steps so the request prefix stays byte-stable
+    between steps, and the pass is idempotent. Human/peer free-text user
+    messages without the batch envelope are never touched — only the daemon's
+    own wake wrapper is eligible for aging. Returns the original list object
+    if nothing changed."""
+    cutoff = _quantized_cutoff(len(messages), keep_recent, quantum)
+    if cutoff <= 0:
+        return messages
+    out: List[Dict[str, Any]] = []
+    changed = False
+    for i, m in enumerate(messages):
+        content = m.get("content")
+        if (
+            i < cutoff
+            and m.get("role") == "user"
+            and isinstance(content, str)
+            and len(content) > min_chars
+        ):
+            aged = _age_one_batch_envelope(content, preview_chars)
+            if aged != content:
+                m = {**m, "content": aged}
+                changed = True
+        out.append(m)
     return out if changed else messages
 
 

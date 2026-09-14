@@ -1168,22 +1168,41 @@ class MonitoringDB:
         cost_usd: float = 0.0,
         status: str = "completed",
         steps_json: str = "[]",
+        history_json: Optional[str] = None,
     ) -> None:
-        """Finalize a trace with output, token counts, cost, duration, and steps."""
+        """Finalize a trace with output, token counts, cost, duration, and steps.
+
+        ``history_json`` replaces the start-time ref with the full snapshot —
+        callers pass it only for failed turns (or TEAMS_TRACE_FULL_HISTORY),
+        since storing ~O(history) per row is quadratic growth."""
         if not trace_id:
             return
         try:
             with self._conn() as conn:
-                conn.execute(
-                    """
-                    UPDATE llm_traces SET
-                        final_response=?, duration_seconds=?, tokens_in=?,
-                        tokens_out=?, cost_usd=?, status=?, steps_json=?
-                    WHERE id=?
-                    """,
-                    (final_response[:8000], duration_seconds, tokens_in,
-                     tokens_out, cost_usd, status, steps_json, trace_id),
-                )
+                if history_json:
+                    conn.execute(
+                        """
+                        UPDATE llm_traces SET
+                            final_response=?, duration_seconds=?, tokens_in=?,
+                            tokens_out=?, cost_usd=?, status=?, steps_json=?,
+                            history_json=?
+                        WHERE id=?
+                        """,
+                        (final_response[:8000], duration_seconds, tokens_in,
+                         tokens_out, cost_usd, status, steps_json, history_json,
+                         trace_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE llm_traces SET
+                            final_response=?, duration_seconds=?, tokens_in=?,
+                            tokens_out=?, cost_usd=?, status=?, steps_json=?
+                        WHERE id=?
+                        """,
+                        (final_response[:8000], duration_seconds, tokens_in,
+                         tokens_out, cost_usd, status, steps_json, trace_id),
+                    )
                 conn.commit()
         except Exception as e:
             log.warning("[MonitorDB] Failed to complete llm_trace %s: %s", trace_id, e)

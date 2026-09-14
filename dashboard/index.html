@@ -2410,7 +2410,9 @@ function renderTraceDetail(t) {
             </div>
             <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word;margin-top:3px;max-height:120px;overflow:auto">${esc((txt || '').slice(0, 1200))}${(txt||'').length > 1200 ? '…' : ''}</div>
         </div>`;
-    }).join('') : '<div style="color:var(--text-muted);font-size:11px">Empty history (first turn)</div>';
+    }).join('') : (t.history_len > 0
+        ? '<div style="color:var(--text-muted);font-size:11px">History snapshot not stored for this turn — stored for failed turns only (TEAMS_TRACE_FULL_HISTORY=1 stores all).</div>'
+        : '<div style="color:var(--text-muted);font-size:11px">Empty history (first turn)</div>');
 
     const pruneBadges = [];
     if (prunedTools > 0) pruneBadges.push(`<span>✂️ <span class="obs-detail-meta-val">${prunedTools} pruned tool results</span></span>`);

@@ -1,6 +1,7 @@
 """Agent daemon wrapper around a Hermes AIAgent instance."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -36,10 +37,15 @@ from teams_server.config import (
     SWEEP_PAYLOAD_AGE_ENABLED,
     SWEEP_PAYLOAD_KEEP_RECENT,
     SWEEP_PAYLOAD_MIN_CHARS,
+    SWEEP_PAYLOAD_AGE_QUANTUM,
     TOOL_RESULT_AGE_ENABLED,
     TOOL_RESULT_AGE_KEEP_MESSAGES,
     TOOL_RESULT_AGE_MIN_CHARS,
     TOOL_RESULT_AGE_QUANTUM,
+    TRACE_FULL_HISTORY,
+    WAKE_PAYLOAD_AGE_ENABLED,
+    WAKE_PAYLOAD_MIN_CHARS,
+    WAKE_PAYLOAD_PREVIEW_CHARS,
     _derive_workspace_path,
     _ensure_project_dir,
     load_agents_config,
@@ -56,6 +62,7 @@ from teams_server.prompts import (
     TEXT_ONLY_TURN_NUDGE,
     age_stale_sweep_payloads,
     age_stale_tool_results,
+    age_stale_wake_payloads,
     compose_agent_soul,
     compose_live_context,
     compose_soul_identity,
@@ -1004,6 +1011,23 @@ class AgentDaemon:
                     min_chars=TOOL_RESULT_AGE_MIN_CHARS,
                     quantum=TOOL_RESULT_AGE_QUANTUM,
                 )
+            # Third pass: stub OLD batch envelopes — processed wake
+            # instructions (cron/heartbeat/peer deliveries) that dominate a
+            # busy worker's user-role history (~99% measured on one
+            # cron-driven agent). Sender headers + a short preview survive so
+            # WHAT arrived stays visible; the executed instruction bulk does
+            # not. keep_recent/quantum are shared with tool-result aging so
+            # both passes move the cache boundary on the SAME turn.
+            # Supervisors skip this pass: their user side is almost entirely
+            # sweep feeds, aged by the counterpart below instead.
+            if WAKE_PAYLOAD_AGE_ENABLED and not self.cfg.get("is_supervisor"):
+                msgs = age_stale_wake_payloads(
+                    msgs,
+                    keep_recent=TOOL_RESULT_AGE_KEEP_MESSAGES,
+                    min_chars=WAKE_PAYLOAD_MIN_CHARS,
+                    quantum=TOOL_RESULT_AGE_QUANTUM,
+                    preview_chars=WAKE_PAYLOAD_PREVIEW_CHARS,
+                )
             # Supervisor counterpart: stub all but the newest sweep payloads
             # (the user-side team feeds that dominate a supervisor's history;
             # its own verdicts stay verbatim as the durable record).
@@ -1012,6 +1036,7 @@ class AgentDaemon:
                     msgs,
                     keep_recent=SWEEP_PAYLOAD_KEEP_RECENT,
                     min_chars=SWEEP_PAYLOAD_MIN_CHARS,
+                    quantum=SWEEP_PAYLOAD_AGE_QUANTUM,
                 )
             log.debug("[%s] Loaded %d messages from session %s", self.name, len(msgs), current_sid)
             return msgs
@@ -2290,6 +2315,7 @@ class AgentDaemon:
         )
         turn_start = time.time()
         trace_id = 0
+        history_json = ""  # set inside try; the error path still references it
         try:
             self._ensure_agent()
             # Heal the team browser before the turn (neko container or local
@@ -2338,6 +2364,17 @@ class AgentDaemon:
             try:
                 tools_count = len(getattr(self._ai_agent, "tools", []) or [])
                 history_json = json.dumps(history, default=str)
+                # Store a compact ref, not the snapshot: embedding ~O(history)
+                # in EVERY trace row grew monitoring.db quadratically (measured
+                # 138 MB of 205 MB). state.db already holds the real messages;
+                # the full snapshot is attached at completion only for failed
+                # turns (or when TEAMS_TRACE_FULL_HISTORY=1).
+                history_ref = json.dumps({
+                    "ref": True,
+                    "sha1": hashlib.sha1(history_json.encode()).hexdigest()[:12],
+                    "messages": len(history),
+                    "chars": len(history_json),
+                })
                 # The task-prompt portion is combined *before* live context was
                 # prepended, but we already prepended it above. Reconstruct:
                 base_prompt = combined[len(live_ctx):].lstrip() if live_ctx else combined
@@ -2352,7 +2389,7 @@ class AgentDaemon:
                     system_prompt=getattr(self._ai_agent, "ephemeral_system_prompt", "") or "",
                     live_context=live_ctx,
                     user_prompt=base_prompt,
-                    history_json=history_json,
+                    history_json=history_ref,
                     history_len=len(history),
                     tools_count=tools_count,
                 )
@@ -2377,13 +2414,19 @@ class AgentDaemon:
                         steps_json=json.dumps(
                             getattr(self, "_current_trace_steps", []), default=str
                         ),
+                        history_json=(
+                            history_json
+                            if (TRACE_FULL_HISTORY or result.get("failed"))
+                            else None
+                        ),
                     )
             except Exception as e:
                 log.debug("[%s] complete_llm_trace (pre-token) failed: %s", self.name, e)
 
             return result
         except Exception as exc:  # noqa: BLE001
-            # Mark a trace that threw an exception as error
+            # Mark a trace that threw an exception as error — always with the
+            # full history snapshot, since this is exactly the forensic case.
             try:
                 if trace_id:
                     monitor_db.complete_llm_trace(
@@ -2394,6 +2437,7 @@ class AgentDaemon:
                         steps_json=json.dumps(
                             getattr(self, "_current_trace_steps", []), default=str
                         ),
+                        history_json=history_json,
                     )
             except Exception:
                 pass
