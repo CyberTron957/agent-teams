@@ -303,7 +303,7 @@ app.add_middleware(
 # itself (so the login UI can render), the load-balancer health probe, and the
 # self-reporting auth probe the dashboard hits at boot. None of these has a
 # mutating handler, so exempting them by exact path (any method) is safe.
-AUTH_EXEMPT_PATHS = {"/", "/health", "/auth/check", "/version/check"}
+AUTH_EXEMPT_PATHS = {"/", "/health", "/auth/check", "/version/check", "/advanced"}
 
 # Application-defined WebSocket close code for an unauthenticated socket
 # (4000-4999 is the private-use range). The dashboard re-opens the login modal
@@ -608,6 +608,78 @@ async def agent_ingest(agent_name: str, request: Request):
     return JSONResponse(resp)
 
 
+# ---------------------------------------------------------------------------
+# Owner chat + Approvals (consumer dashboard surfaces)
+# ---------------------------------------------------------------------------
+@app.post("/agent/{agent_name}/chat")
+async def agent_chat_send(agent_name: str, request: Request):
+    """A message from the owner chat UI. Logged to the owner channel ('owner_in')
+    and enqueued as a task tagged 'owner_chat' so the agent knows to reply via
+    the message_owner tool (with an end-of-turn echo as fallback)."""
+    import time
+
+    from teams_server.websocket import _broadcast
+
+    body = await request.json()
+    msg = (body.get("message") or "").strip()
+    if not msg:
+        return JSONResponse({"error": "empty message"}, status_code=400)
+    daemon = daemons.get(agent_name)
+    if daemon is None:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+
+    team_id = (daemon.cfg or {}).get("team_id") or None
+    monitor_db.log_message(agent_name, "owner_in", msg, team_id=team_id)
+    _broadcast("owner_message", {
+        "agent_name": agent_name, "role": "owner_in",
+        "content": msg, "timestamp": time.time(),
+    })
+    task_id = daemon.ingest_task("owner_chat", msg)
+    return JSONResponse({"status": "queued", "task_id": task_id})
+
+
+@app.get("/agent/{agent_name}/chat")
+async def agent_chat_history(agent_name: str, limit: int = 200):
+    """Owner↔agent chat history — the focused channel, not the execution log."""
+    msgs = monitor_db.get_owner_messages(agent_name, limit=max(1, min(limit, 500)))
+    msgs.reverse()
+    return JSONResponse({"agent": agent_name, "messages": msgs})
+
+
+@app.get("/approvals")
+async def approvals_list(team_id: str = None):
+    """Everything waiting on the owner, unified: pending ask_human questions
+    (incl. browser takeovers) + pending agent config-change proposals."""
+    from teams_server.tools import get_pending_questions, get_config_proposals
+
+    cfg = load_agents_config()
+    items = []
+    for q in get_pending_questions():
+        if q["status"] != "pending":
+            continue
+        if team_id and q.get("team_id") != team_id:
+            continue
+        items.append({
+            "id": q["id"], "type": "question", "kind": q.get("kind", "question"),
+            "agent_name": q["agent_name"], "team_id": q.get("team_id", ""),
+            "text": q["question"], "timestamp": q["timestamp"],
+        })
+    for p in get_config_proposals():
+        if p["status"] != "pending":
+            continue
+        pteam = (cfg["agents"].get(p["agent_name"]) or {}).get("team_id", "")
+        if team_id and pteam != team_id:
+            continue
+        items.append({
+            "id": p["id"], "type": "config_change", "kind": "config_change",
+            "agent_name": p["agent_name"], "team_id": pteam,
+            "text": p.get("reason") or "Requests a settings change",
+            "changes": p.get("changes", {}), "timestamp": p["timestamp"],
+        })
+    items.sort(key=lambda i: i["timestamp"], reverse=True)
+    return JSONResponse({"approvals": items, "pending_count": len(items)})
+
+
 @app.get("/agent/{agent_name}/status")
 async def agent_status(agent_name: str):
     daemon = daemons.get(agent_name)
@@ -633,6 +705,22 @@ def _shape_digest(row: Dict[str, Any]) -> Dict[str, Any]:
                           "did": [], "blocked_on": None, "next": None,
                           "risk_level": "watch"}
     return out
+
+
+@app.get("/audit_log")
+async def get_audit_log(team_id: str = "", limit: int = 60):
+    """Owner-facing audit trail: human decisions (answered questions, resolved
+    proposals, pauses/stops) + agent-recorded side-effects, merged newest-first."""
+    rows = monitor_db.get_audit_feed(team_id or None, limit=max(1, min(limit, 200)))
+    return JSONResponse({"entries": rows, "count": len(rows)})
+
+
+@app.get("/results")
+async def get_results(team_id: str = "", limit: int = 50):
+    """Outcome cards agents published via publish_result — the consumer
+    dashboard's Results board. Newest first, optionally scoped to a team."""
+    rows = monitor_db.get_results(team_id or None, limit=max(1, min(limit, 200)))
+    return JSONResponse({"results": rows, "count": len(rows)})
 
 
 @app.get("/agent/{agent_name}/digest")
@@ -751,6 +839,13 @@ async def _finalize_human_answer(daemon, qid: str, response_text: str) -> Dict[s
             "Do not just acknowledge — finish the task and report what went live."
         )
         daemon.ingest_task("human", resume_msg)
+        # The in-turn path logs human_responded inside ask_human's handler; the
+        # task path ends its turn without that log, so record it here for the
+        # audit trail (History tab).
+        monitor_db.log_event(
+            result["agent"], "human_responded",
+            data={"question": result.get("question", ""), "response": response_text},
+            team_id=(daemon.cfg or {}).get("team_id"))
     return {"ok": True, "delivery": result["delivery"], "question_id": qid}
 
 
@@ -867,6 +962,7 @@ async def del_team(team_id: str):
 
     # 6. Delete team from config and wipe workspace on disk
     if delete_team(cfg, team_id):
+        from teams_server.websocket import _broadcast
         _broadcast("team_deleted", {"team_id": team_id, "timestamp": time.time()})
         return JSONResponse({"status": "deleted", "team_id": team_id})
     return JSONResponse({"error": "team not found"}, status_code=404)
@@ -1981,6 +2077,11 @@ async def approve_proposal(proposal_id: str):
         "status": "approved",
         "timestamp": __import__("time").time(),
     })
+    monitor_db.log_event(
+        agent_name, "proposal_resolved",
+        data={"status": "approved", "changes": target.get("changes"),
+              "reason": target.get("reason", "")},
+        team_id=a.get("team_id"))
     # Tell the agent its proposal landed so it can proceed accordingly.
     daemon = daemons.get(agent_name)
     if daemon is not None:
@@ -2005,6 +2106,13 @@ async def reject_proposal(proposal_id: str):
         "status": "rejected",
         "timestamp": __import__("time").time(),
     })
+    cfg = load_agents_config()
+    a = (cfg.get("agents") or {}).get(resolved["agent_name"]) or {}
+    monitor_db.log_event(
+        resolved["agent_name"], "proposal_resolved",
+        data={"status": "rejected", "changes": resolved.get("changes"),
+              "reason": resolved.get("reason", "")},
+        team_id=a.get("team_id"))
     return JSONResponse({"status": "rejected", "proposal_id": proposal_id})
 
 
@@ -2373,6 +2481,103 @@ async def auth_check(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Templates & onboarding
+# ---------------------------------------------------------------------------
+@app.get("/templates")
+async def templates_list():
+    """Predefined business-team templates for the onboarding gallery."""
+    from teams_server import templates as _t
+
+    return JSONResponse({"templates": _t.list_templates()})
+
+
+@app.get("/templates/{template_id}")
+async def template_detail(template_id: str):
+    """Full spec of one predefined template (for the review screen)."""
+    from teams_server import templates as _t
+
+    spec = _t.full_template(template_id)
+    if spec is None:
+        return JSONResponse({"error": "template not found"}, status_code=404)
+    return JSONResponse({"template": spec})
+
+
+@app.get("/onboarding/draft")
+async def onboarding_draft_get():
+    """The team spec the Architect saved via master_save_template, if any."""
+    from teams_server import templates as _t
+
+    return JSONResponse({"draft": _t.get_draft()})
+
+
+@app.delete("/onboarding/draft")
+async def onboarding_draft_delete():
+    from teams_server import templates as _t
+
+    _t.clear_draft()
+    return JSONResponse({"status": "cleared"})
+
+
+@app.post("/teams/from_template")
+async def team_from_template(request: Request):
+    """Instantiate a team spec (predefined template or Architect draft) into a
+    live team: creates the team, every agent, bidirectional links, and the
+    shared workspace.md brief, then registers the running daemons."""
+    import time
+
+    from teams_server import templates as _t
+    from teams_server.websocket import _broadcast
+
+    body = await request.json()
+    # Accept either a full spec or {"template_id": "..."} referencing a
+    # predefined template.
+    if body.get("template_id"):
+        spec = _t.full_template(str(body["template_id"]))
+        if spec is None:
+            return JSONResponse({"error": "template not found"}, status_code=404)
+        # Allow a custom team display name over the template default.
+        if (body.get("name") or "").strip():
+            spec["name"] = body["name"].strip()
+    else:
+        spec = {
+            "name": (body.get("name") or "").strip() or "My Team",
+            "description": body.get("description") or "",
+            "brief": body.get("brief") or "",
+            "agents": body.get("agents") or [],
+        }
+
+    try:
+        result = _t.instantiate_spec(spec)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    loop = asyncio.get_running_loop()
+    for a in result["agents"]:
+        if a["agent_name"] not in daemons:
+            register_agent_daemon(a["agent_name"], a["cfg"], loop)
+
+    now = time.time()
+    _broadcast("team_created", {"team_id": result["team_id"],
+                                "name": result["team_name"], "timestamp": now})
+    for a in result["agents"]:
+        _broadcast("agent_created", {"agent_name": a["agent_name"],
+                                     "name": a["display_name"],
+                                     "team_id": result["team_id"],
+                                     "timestamp": now})
+    # The Architect's draft is single-use — consume it once a team was built.
+    _t.clear_draft()
+    log.info("[teams] built team '%s' from template (%d agents)",
+             result["team_id"], len(result["agents"]))
+    return JSONResponse({
+        "status": "created",
+        "team_id": result["team_id"],
+        "team_name": result["team_name"],
+        "agents": [{k: v for k, v in a.items() if k != "cfg"}
+                   for a in result["agents"]],
+    })
+
+
+# ---------------------------------------------------------------------------
 # Dashboard Root
 # ---------------------------------------------------------------------------
 @app.get("/")
@@ -2384,6 +2589,16 @@ async def root_dashboard():
         "<h1>Dashboard not found</h1><p>Run from project root.</p>",
         status_code=404,
     )
+
+
+@app.get("/advanced")
+async def advanced_dashboard():
+    """The operator dashboard (network graph, traces, inbox, config) — kept for
+    power users and debugging alongside the simplified consumer UI."""
+    f = DASHBOARD_DIR / "advanced.html"
+    if f.exists():
+        return FileResponse(str(f))
+    return HTMLResponse("<h1>Advanced dashboard not found</h1>", status_code=404)
 
 
 # ---------------------------------------------------------------------------

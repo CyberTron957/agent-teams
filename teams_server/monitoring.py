@@ -107,6 +107,18 @@ class MonitoringDB:
         covers_to_decision  INTEGER
     );
 
+    -- Results: outcome cards an agent deliberately publishes for the owner
+    -- (via publish_result). Not file listings — business-language outcomes.
+    CREATE TABLE IF NOT EXISTS results (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp           REAL    NOT NULL,
+        agent_name          TEXT    NOT NULL,
+        team_id             TEXT,
+        title               TEXT    NOT NULL,
+        summary             TEXT    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_results_team ON results(team_id);
+
     -- Full LLM API call traces: one row per agent turn, capturing inputs sent
     -- to the model and outputs received, for the Observability dashboard.
     CREATE TABLE IF NOT EXISTS llm_traces (
@@ -457,6 +469,24 @@ class MonitoringDB:
             log.warning("[MonitorDB] Failed to get messages: %s", e)
             return []
 
+    def get_owner_messages(self, agent_name: str, limit: int = 200) -> List[dict]:
+        """The owner↔agent chat channel only: roles 'owner_in' (owner → agent)
+        and 'owner_out' (agent → owner via message_owner). Excludes the internal
+        execution transcript the ops dashboard shows."""
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE agent_name = ? "
+                    "AND role IN ('owner_in', 'owner_out') "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (agent_name, limit),
+                ).fetchall()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            log.warning("[MonitorDB] Failed to get owner messages: %s", e)
+            return []
+
     # ---- digests (Layer 3 observability) -----------------------------------
 
     def get_new_activity(
@@ -560,6 +590,87 @@ class MonitoringDB:
         except Exception as e:
             log.warning("[MonitorDB] save_digest failed: %s", e)
             return None
+
+    # Event types that make up the owner-facing audit feed.
+    AUDIT_EVENT_TYPES = (
+        "human_responded", "proposal_resolved", "agent_paused",
+        "agent_resumed", "execution_stopped",
+    )
+
+    def get_audit_feed(self, team_id: str = None, limit: int = 60) -> List[dict]:
+        """Merged audit trail for the consumer History tab: the human's decisions
+        (answered questions, approved/rejected proposals, pauses/stops) plus the
+        side-effecting actions agents recorded via log_action. Newest first."""
+        feed: List[dict] = []
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                ph = ",".join("?" * len(self.AUDIT_EVENT_TYPES))
+                sql = f"SELECT * FROM events WHERE event_type IN ({ph})"
+                params: list = list(self.AUDIT_EVENT_TYPES)
+                if team_id:
+                    tclause, tparams = self._team_filter(conn, team_id)
+                    if tclause:
+                        sql += " AND " + tclause
+                        params.extend(tparams)
+                sql += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                for r in conn.execute(sql, tuple(params)).fetchall():
+                    d = dict(r)
+                    try:
+                        d["data"] = json.loads(d.get("data") or "{}")
+                    except Exception:
+                        d["data"] = {}
+                    feed.append(d)
+        except Exception as e:
+            log.warning("[MonitorDB] get_audit_feed events failed: %s", e)
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                sql = "SELECT * FROM actions"
+                params = []
+                if team_id:
+                    sql += " WHERE team_id = ?"
+                    params.append(team_id)
+                sql += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                for r in conn.execute(sql, tuple(params)).fetchall():
+                    feed.append({"event_type": "agent_action", **dict(r)})
+        except Exception as e:
+            log.warning("[MonitorDB] get_audit_feed actions failed: %s", e)
+        feed.sort(key=lambda r: r.get("timestamp") or 0, reverse=True)
+        return feed[:limit]
+
+    def log_result(self, agent_name: str, title: str, summary: str,
+                   team_id: str = None) -> Optional[int]:
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    "INSERT INTO results (timestamp, agent_name, team_id, title, summary) "
+                    "VALUES (?,?,?,?,?)",
+                    (time.time(), agent_name, team_id, title, summary))
+                conn.commit()
+                return cur.lastrowid
+        except Exception as e:
+            log.warning("[MonitorDB] log_result failed: %s", e)
+            return None
+
+    def get_results(self, team_id: str = None, limit: int = 50) -> List[dict]:
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                if team_id:
+                    rows = conn.execute(
+                        "SELECT * FROM results WHERE team_id = ? ORDER BY id DESC LIMIT ?",
+                        (team_id, limit)).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM results ORDER BY id DESC LIMIT ?",
+                        (limit,)).fetchall()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            log.warning("[MonitorDB] get_results failed: %s", e)
+            return []
 
     def prune(self, max_events: int, max_messages: int,
               max_digests: int = 5000, max_delegations: int = 20000,

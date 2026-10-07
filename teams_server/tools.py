@@ -315,6 +315,61 @@ _ASK_HUMAN_TOOL_SCHEMA = {
     },
 }
 
+_MESSAGE_OWNER_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "message_owner",
+        "description": (
+            "Send a message to your owner — the human who runs this app. This is the "
+            "ONLY channel they see: your reasoning, tool calls, and working are "
+            "invisible to them. ALWAYS use it to answer a direct message from the "
+            "owner, and proactively when you finish something they asked for or "
+            "produce a result worth seeing. For a decision, approval, credential, "
+            "or anything you need answered, use ask_human instead — that lands in "
+            "their Approvals queue."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "What to tell the owner — plain language, concise, no internal jargon.",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+}
+
+_PUBLISH_RESULT_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "publish_result",
+        "description": (
+            "Publish a finished outcome to the owner's Results board - use this when "
+            "you produce something the owner cares about: a batch of leads, a drafted "
+            "email, a report, a comparison, a decision-ready finding. The card is the "
+            "result itself, not a file: title in plain business language, summary with "
+            "the substance (numbers, names, the actual content or where it lives). "
+            "Do NOT use it for status chatter or questions (use ask_human for those)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Plain-language headline, e.g. '12 new AI-job leads found' or 'Weekly ops report'.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "The result content for the owner - key numbers/items/findings. Markdown ok. Include what to do next if relevant.",
+                },
+            },
+            "required": ["title", "summary"],
+        },
+    },
+}
+
 _REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -1084,6 +1139,53 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "response": response})
 
 
+def _message_owner_handler(args: dict, **kwargs) -> str:
+    """Owner chat channel: a message the agent deliberately sends to the human
+    owner's chat view (role 'owner_out'). This is the ONLY channel the simple
+    dashboard shows — everything else the agent does stays in the background."""
+    message = (args.get("message") or "").strip()
+    if not message:
+        return json.dumps({"error": "message is required"})
+    task_id_arg = kwargs.get("task_id", "")
+    caller = "unknown"
+    if task_id_arg and task_id_arg.startswith("agent_name:"):
+        caller = task_id_arg.split(":", 1)[1]
+
+    daemon = _daemon_registry.get(caller)
+    team_id = ""
+    if daemon is not None:
+        # Suppress the end-of-turn echo fallback: the agent answered explicitly.
+        daemon._owner_messaged = True
+        team_id = (daemon.cfg or {}).get("team_id", "")
+    monitor_db.log_message(caller, "owner_out", message, team_id=team_id or None)
+    _broadcast("owner_message", {
+        "agent_name": caller, "role": "owner_out",
+        "content": message, "timestamp": time.time(),
+    })
+    return json.dumps({"success": True, "delivered": "owner_chat"})
+
+
+def _publish_result_handler(args: dict, **kwargs) -> str:
+    """Owner Results channel: a finished outcome the agent deliberately publishes,
+    shown on the dashboard's Results board as a card the owner can review."""
+    title = (args.get("title") or "").strip()
+    summary = (args.get("summary") or "").strip()
+    if not title:
+        return json.dumps({"error": "title is required"})
+    task_id_arg = kwargs.get("task_id", "")
+    caller = "unknown"
+    if task_id_arg and task_id_arg.startswith("agent_name:"):
+        caller = task_id_arg.split(":", 1)[1]
+    daemon = _daemon_registry.get(caller)
+    team_id = (daemon.cfg or {}).get("team_id", "") if daemon is not None else ""
+    monitor_db.log_result(caller, title, summary or title, team_id=team_id or None)
+    _broadcast("result_published", {
+        "agent_name": caller, "team_id": team_id,
+        "title": title, "summary": summary, "timestamp": time.time(),
+    })
+    return json.dumps({"success": True, "delivered": "results_board"})
+
+
 def _request_human_takeover_handler(args: dict, **kwargs) -> str:
     """Open the team browser as a real window on the human's screen, block until
     they finish, then relaunch it headless and resume. Mirrors ask_human's blocking
@@ -1631,6 +1733,24 @@ def _register_custom_tools():
                 description="Ask a human for clarification.",
             )
             log.info("[ask_human] Registered")
+        if "publish_result" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="publish_result",
+                toolset="custom",
+                schema=_PUBLISH_RESULT_TOOL_SCHEMA["function"],
+                handler=_publish_result_handler,
+                description="Publish a finished outcome to the owner's Results board.",
+            )
+            log.info("[publish_result] Registered")
+        if "message_owner" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="message_owner",
+                toolset="custom",
+                schema=_MESSAGE_OWNER_TOOL_SCHEMA["function"],
+                handler=_message_owner_handler,
+                description="Send a message to the human owner's chat view.",
+            )
+            log.info("[message_owner] Registered")
         if "request_human_takeover" not in (registry.get_tool_to_toolset_map() or {}):
             registry.register(
                 name="request_human_takeover",

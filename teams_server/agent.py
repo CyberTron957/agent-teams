@@ -362,6 +362,7 @@ def _inject_teams_tools(agent, *, is_supervisor: bool,
         _GET_SELF_CONFIG_TOOL_SCHEMA, _REQUEST_CONFIG_CHANGE_TOOL_SCHEMA,
         _SCHEDULE_WAKEUP_TOOL_SCHEMA, _CANCEL_WAKEUP_TOOL_SCHEMA,
         _PAUSE_AGENT_TOOL_SCHEMA, _RESUME_AGENT_TOOL_SCHEMA,
+        _MESSAGE_OWNER_TOOL_SCHEMA, _PUBLISH_RESULT_TOOL_SCHEMA,
     )
     from teams_server.task_tools import TASK_TOOL_SCHEMAS
 
@@ -382,6 +383,8 @@ def _inject_teams_tools(agent, *, is_supervisor: bool,
     # Always-on coordination + util (workers AND supervisors).
     add(_SEND_PEER_MESSAGE_TOOL_SCHEMA, required=True)  # never disabled
     add(_ASK_HUMAN_TOOL_SCHEMA)
+    add(_MESSAGE_OWNER_TOOL_SCHEMA)                      # owner chat channel
+    add(_PUBLISH_RESULT_TOOL_SCHEMA)                     # results board
     add(_REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA)             # human browser handoff
     add(_LOG_DECISION_TOOL_SCHEMA)                       # strategy memory
     add(_RECALL_DECISIONS_TOOL_SCHEMA)
@@ -492,6 +495,12 @@ class AgentDaemon:
         self._paused = False
         self._pause_reason = ""
         self._paused_by = ""
+        # Owner-chat tracking: set when a batch contains a message from the
+        # owner's chat screen (from_agent == "owner_chat"). If the agent ends the
+        # turn WITHOUT calling message_owner, its final reply is echoed to the
+        # owner channel so the chat never dead-ends in silence.
+        self._owner_chat_pending = False
+        self._owner_messaged = False
         # Hermes reports session-CUMULATIVE token counts; we track the last
         # totals so each batch can log its real per-turn deltas (not just a
         # char estimate). All four counters share one reset rule: a shrinking
@@ -2459,6 +2468,11 @@ class AgentDaemon:
         # LLM observability: reset per-turn trace accumulators.
         self._current_trace_id = 0
         self._current_trace_steps = []
+        # Owner-chat channel: does this batch include a direct owner message?
+        self._owner_chat_pending = any(
+            t.get("from_agent") == "owner_chat" for t in tasks
+        )
+        self._owner_messaged = False
         # Derive trigger type from the first task's source agent name.
         first_src = (tasks[0].get("from_agent") or "") if tasks else ""
         if first_src == "autonomous":
@@ -2854,6 +2868,21 @@ class AgentDaemon:
                     "task_id": task_preview,
                     "timestamp": time.time(),
                 })
+
+            # Owner-chat fallback: a direct owner message should never dead-end
+            # silently. If the agent didn't reply via message_owner this turn,
+            # echo its final response into the owner channel.
+            if self._owner_chat_pending:
+                self._owner_chat_pending = False
+                if not self._owner_messaged and final.strip():
+                    monitor_db.log_message(
+                        self.name, "owner_out", final, ",".join(task_ids),
+                        team_id=(self.cfg or {}).get("team_id"),
+                    )
+                    _broadcast("owner_message", {
+                        "agent_name": self.name, "role": "owner_out",
+                        "content": final, "timestamp": time.time(),
+                    })
 
             monitor_db.log_event(self.name, "conversation_complete", data={"response_preview": final[:200]})
             _broadcast("conversation_complete", {

@@ -209,15 +209,18 @@ autonomous driver, and don't create more agents than the goal needs. A focused
    (name, one-line role, supervisor/autonomous flags), the link topology, and a
    draft of workspace.md. EVERY proposal must include exactly one supervisor —
    if you forgot one, add it before proposing. Let the human correct it.
-3. BUILD only after the human approves. Use the tools: create the team, create
-   each agent with its full soul, set the links, write workspace.md and any seed
-   files. Create the supervisor LAST (after the agents it watches exist) and link
-   it to them.
-4. VERIFY with master_get_team and report what you built in plain language.
-   Offer to kick the team off with master_send_task (usually a first directive to
-   the lead/autonomous agent).
-5. For EDITS to existing teams ("add a QA agent", "change the brief"), inspect
-   first with master_overview / master_get_team, then make the targeted change.
+3. HAND OFF FOR REVIEW once the human approves a NEW team design: call
+   master_save_template with the full spec — name, a one-line description, the
+   workspace.md brief, and every agent (each with a unique slug `key`, a
+   display_name, a one-line `role` the human will read, the role_soul, `peers`
+   as other agents' keys, and is_supervisor/autonomous flags). The app then
+   shows the human a review screen and builds the team itself — you do NOT call
+   the create_* tools for a new team.
+4. Tell the human their plan is ready for review and summarize it in plain
+   language.
+5. For EDITS to existing live teams ("add a QA agent", "change the brief"),
+   inspect first with master_overview / master_get_team, then use the direct
+   create/update/link tools to make the targeted change.
 
 # Safety
 
@@ -234,9 +237,10 @@ autonomous driver, and don't create more agents than the goal needs. A focused
 # Short operating reminder pinned as the ephemeral system prompt (the manual
 # above lives in SOUL.md as the lead identity block).
 MASTER_EPHEMERAL = """\
-Operating rules: interview → propose in chat → build only on explicit approval →
-verify → offer to kick off. Create supervisors after their workers exist. Keep
-souls and workspace.md lean. Never invent credentials. Confirm before any delete.
+Operating rules: interview → propose in chat → on approval call
+master_save_template (the app builds it after the human reviews). For edits to
+existing teams use the direct create/update tools. Keep souls and workspace.md
+lean. Never invent credentials. Confirm before any delete.
 Each reply is shown to the human in a chat panel — be concrete and concise.
 """
 
@@ -317,6 +321,19 @@ _MASTER_TOOL_SCHEMAS: List[dict] = [
         "List files under a team area (workspace or project).",
         {"team_id": {"type": "string"}, "area": _AREA_PROP},
         ["team_id", "area"]),
+    _fn("master_save_template",
+        "Save a proposed NEW team as a reviewable template file. Call this INSTEAD of "
+        "the create_* tools when the human approves a new-team design — the app shows "
+        "them a review screen and instantiates the team on their confirmation. Each "
+        "agent: {key (unique slug), display_name, role (one line the human reads), "
+        "role_soul, peers (list of other agents' keys), is_supervisor, autonomous}. "
+        "Exactly one is_supervisor (linked to every worker) and exactly one autonomous "
+        "driver are required.",
+        {"name": {"type": "string", "description": "team display name"},
+         "description": {"type": "string", "description": "one-line summary for the review screen"},
+         "brief": {"type": "string", "description": "workspace.md content — the shared brief"},
+         "agents": {"type": "array", "items": {"type": "object"}}},
+        ["name", "agents"]),
     _fn("master_send_task",
         "Send a task/directive to an agent (as if from the human operator) — use this to "
         "kick a freshly-built team off via its lead/autonomous agent.",
@@ -716,6 +733,34 @@ def _master_send_task_handler(args: dict, **kwargs) -> str:
     return _ok(agent_name=agent_name, task_id=task_id, warnings=warnings)
 
 
+def _master_save_template_handler(args: dict, **kwargs) -> str:
+    if (g := _guard(kwargs)):
+        return g
+    from teams_server.templates import save_draft
+
+    agents = args.get("agents")
+    if not isinstance(agents, list) or not agents:
+        return _err("agents must be a non-empty list of {key, display_name, role, "
+                    "role_soul, peers, is_supervisor, autonomous}.")
+    spec = {
+        "name": (args.get("name") or "").strip() or "My Team",
+        "description": (args.get("description") or "").strip(),
+        "brief": (args.get("brief") or "").strip(),
+        "agents": agents,
+    }
+    try:
+        save_draft(spec)
+    except ValueError as e:
+        return _err(str(e))
+    log.info("[master] saved team template '%s' (%d agents)", spec["name"], len(agents))
+    _broadcast("template_draft_saved", {
+        "name": spec["name"], "agent_count": len(agents), "timestamp": time.time(),
+    })
+    return _ok(name=spec["name"], agent_count=len(agents),
+               message="Saved. The app now shows the human a review screen where "
+                       "they confirm and the team is built.")
+
+
 def _master_delete_agent_handler(args: dict, **kwargs) -> str:
     if (g := _guard(kwargs)):
         return g
@@ -764,6 +809,7 @@ _MASTER_HANDLERS = {
     "master_write_file": _master_write_file_handler,
     "master_read_file": _master_read_file_handler,
     "master_list_files": _master_list_files_handler,
+    "master_save_template": _master_save_template_handler,
     "master_send_task": _master_send_task_handler,
     "master_delete_agent": _master_delete_agent_handler,
     "master_delete_team": _master_delete_team_handler,

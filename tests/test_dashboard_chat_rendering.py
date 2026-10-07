@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DASHBOARD = PROJECT_ROOT / "dashboard" / "index.html"
+DASHBOARD = PROJECT_ROOT / "dashboard" / "advanced.html"
 
 
 def _source() -> str:
